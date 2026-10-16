@@ -2,6 +2,14 @@
 
 macOS app for the M-VAVE SMC-Mixer. It reads the device identity and both stored profiles over USB-C or Bluetooth, edits the CC / User profile, and writes the changed records back.
 
+![SMC Mixer Tool connected to an SMC-Mixer over Bluetooth](docs/screenshot.png)
+
+## Download
+
+[SMC Mixer Tool 1.0.0](https://github.com/deadjoe/SMC-Mixer-Tool/releases/tag/v1.0.0) is a universal macOS app for Apple silicon and Intel, on macOS 12 or later.
+
+The app is not notarized. The first time you open it, Control-click SMC Mixer Tool and choose Open.
+
 ## Use
 
 Connect the mixer with USB-C or Bluetooth and open the app. It reads a 6,282-byte settings image: the DAW profile, then the CC / User profile, 3,141 bytes each. Click a knob, fader, or button to see that control's stored settings. The panel only selects a control. It does not send performance MIDI.
