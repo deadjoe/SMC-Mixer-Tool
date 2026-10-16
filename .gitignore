@@ -1,0 +1,6 @@
+build/
+build-release/
+.DS_Store
+
+# Vendor manual. It stays on disk and is not part of this source tree.
+SMC-MIXER_ZE.pdf

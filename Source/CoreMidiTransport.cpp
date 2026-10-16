@@ -1,0 +1,344 @@
+#include "CoreMidiTransport.h"
+
+#include <algorithm>
+#include <cctype>
+#include <cstdlib>
+#include <cstring>
+#include <stdexcept>
+#include <thread>
+
+namespace
+{
+std::string lowercased(std::string value)
+{
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char character) {
+        return static_cast<char>(std::tolower(character));
+    });
+    return value;
+}
+
+bool containsCaseInsensitive(const std::string& value, const std::string& part)
+{
+    return lowercased(value).find(lowercased(part)) != std::string::npos;
+}
+}
+
+std::string MidiEndpointDescriptor::fullName() const
+{
+    std::string result;
+    for (const auto* value : { &deviceName, &entityName, &endpointName })
+    {
+        if (value->empty() || *value == "(none)")
+            continue;
+        if (!result.empty())
+            result += ' ';
+        result += *value;
+    }
+    return result;
+}
+
+CoreMidiTransport::~CoreMidiTransport()
+{
+    close();
+}
+
+MidiEndpointDescriptor CoreMidiTransport::descriptor(MIDIEndpointRef endpoint)
+{
+    MIDIEntityRef entity = MIDIEntityRef {};
+    MIDIEndpointGetEntity(endpoint, &entity);
+    MIDIDeviceRef device = MIDIDeviceRef {};
+    if (entity != MIDIEntityRef {})
+        MIDIEntityGetDevice(entity, &device);
+
+    return {
+        endpoint,
+        objectName(endpoint),
+        entity == MIDIEntityRef {} ? "(none)" : objectName(entity),
+        device == MIDIDeviceRef {} ? "(none)" : objectName(device)
+    };
+}
+
+std::string CoreMidiTransport::objectName(MIDIObjectRef object)
+{
+    CFStringRef name = nullptr;
+    if (MIDIObjectGetStringProperty(object, kMIDIPropertyName, &name) != noErr || name == nullptr)
+        return "(unknown)";
+
+    const auto maximumSize = CFStringGetMaximumSizeForEncoding(CFStringGetLength(name), kCFStringEncodingUTF8) + 1;
+    std::string result(static_cast<std::size_t>(maximumSize), '\0');
+    if (!CFStringGetCString(name, result.data(), maximumSize, kCFStringEncodingUTF8))
+        result = "(unknown)";
+    else
+        result.resize(std::strlen(result.c_str()));
+    CFRelease(name);
+    return result;
+}
+
+std::vector<MidiEndpointDescriptor> CoreMidiTransport::sources()
+{
+    std::vector<MidiEndpointDescriptor> result;
+    const auto count = MIDIGetNumberOfSources();
+    result.reserve(static_cast<std::size_t>(count));
+    for (ItemCount index = 0; index < count; ++index)
+        result.push_back(descriptor(MIDIGetSource(index)));
+    return result;
+}
+
+std::vector<MidiEndpointDescriptor> CoreMidiTransport::destinations()
+{
+    std::vector<MidiEndpointDescriptor> result;
+    const auto count = MIDIGetNumberOfDestinations();
+    result.reserve(static_cast<std::size_t>(count));
+    for (ItemCount index = 0; index < count; ++index)
+        result.push_back(descriptor(MIDIGetDestination(index)));
+    return result;
+}
+
+bool CoreMidiTransport::findEndpoints(TransportKind transport,
+                                      MidiEndpointDescriptor& selectedSource,
+                                      MidiEndpointDescriptor& selectedDestination)
+{
+    const auto* endpointKind = transport == TransportKind::usbC ? "Private" : "Bluetooth";
+    const auto matches = [endpointKind](const MidiEndpointDescriptor& item) {
+        const auto name = item.fullName();
+        return containsCaseInsensitive(name, "SMC-Mixer") && containsCaseInsensitive(name, endpointKind);
+    };
+
+    const auto sourceList = sources();
+    const auto destinationList = destinations();
+    const auto sourceMatch = std::find_if(sourceList.begin(), sourceList.end(), matches);
+    const auto destinationMatch = std::find_if(destinationList.begin(), destinationList.end(), matches);
+    if (sourceMatch == sourceList.end() || destinationMatch == destinationList.end())
+        return false;
+
+    selectedSource = *sourceMatch;
+    selectedDestination = *destinationMatch;
+    return true;
+}
+
+Bytes CoreMidiTransport::query(TransportKind transport,
+                              const Bytes& message,
+                              std::chrono::milliseconds timeout,
+                              const std::atomic<bool>* stop)
+{
+    open(transport);
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        responseBuffer.clear();
+        completedResponse.reset();
+        capturedResponses.clear();
+        capturing = false;
+    }
+    send(message);
+
+    std::unique_lock<std::mutex> lock(mutex);
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    bool received = false;
+    while (std::chrono::steady_clock::now() < deadline)
+    {
+        if (stop != nullptr && stop->load())
+            throw std::runtime_error("操作已取消");
+        received = condition.wait_for(lock, std::chrono::milliseconds(200), [this] {
+            return completedResponse.has_value();
+        });
+        if (received)
+            break;
+    }
+    if (stop != nullptr && stop->load())
+        throw std::runtime_error("操作已取消");
+    if (!received)
+        throw std::runtime_error("等待厂商 MIDI 响应超时，请检查设备连接和传输方式");
+    if (!completedResponse || completedResponse->empty())
+        throw std::runtime_error("收到了空的厂商 MIDI 响应");
+    return *completedResponse;
+}
+
+std::vector<Bytes> CoreMidiTransport::sendAndCapture(TransportKind transport,
+                                                     const Bytes& message,
+                                                     std::chrono::milliseconds duration,
+                                                     const std::atomic<bool>* stop)
+{
+    open(transport);
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        responseBuffer.clear();
+        completedResponse.reset();
+        capturedResponses.clear();
+        capturing = true;
+    }
+
+    try
+    {
+        send(message);
+        const auto deadline = std::chrono::steady_clock::now() + duration;
+        while (std::chrono::steady_clock::now() < deadline)
+        {
+            if (stop != nullptr && stop->load())
+                throw std::runtime_error("操作已取消");
+            const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+                deadline - std::chrono::steady_clock::now());
+            if (remaining.count() <= 0)
+                break;
+            std::this_thread::sleep_for(std::min(remaining, std::chrono::milliseconds(200)));
+        }
+    }
+    catch (...)
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        capturing = false;
+        throw;
+    }
+
+    std::lock_guard<std::mutex> lock(mutex);
+    capturing = false;
+    responseBuffer.clear();
+    return capturedResponses;
+}
+
+void CoreMidiTransport::open(TransportKind transport)
+{
+    if (isOpen && openTransport == transport)
+        return;
+    close();
+
+    MidiEndpointDescriptor selectedSource;
+    MidiEndpointDescriptor selectedDestination;
+    if (!findEndpoints(transport, selectedSource, selectedDestination))
+    {
+        if (transport == TransportKind::usbC)
+            throw std::runtime_error("未找到 SMC-Mixer USB-C MIDI 端点，请检查线缆和设备电源");
+        throw std::runtime_error("未找到 SMC-Mixer 蓝牙 MIDI 端点，请先在“音频 MIDI 设置”中连接设备");
+    }
+
+    openTransport = transport;
+    source = selectedSource.endpoint;
+    destination = selectedDestination.endpoint;
+    selectedSourceName = selectedSource.fullName();
+    selectedDestinationName = selectedDestination.fullName();
+
+    try
+    {
+        check(MIDIClientCreate(CFSTR("SMC Mixer Tool"), nullptr, nullptr, &client), "MIDIClientCreate");
+        check(MIDIInputPortCreate(client, CFSTR("SMC Response Input"), midiReadCallback, this, &inputPort),
+              "MIDIInputPortCreate");
+        check(MIDIOutputPortCreate(client, CFSTR("SMC Query Output"), &outputPort), "MIDIOutputPortCreate");
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            acceptingMidi = true;
+            responseBuffer.clear();
+            completedResponse.reset();
+            capturedResponses.clear();
+            capturing = false;
+        }
+        check(MIDIPortConnectSource(inputPort, source, nullptr), "MIDIPortConnectSource");
+        isOpen = true;
+    }
+    catch (...)
+    {
+        close();
+        throw;
+    }
+}
+
+void CoreMidiTransport::send(const Bytes& message)
+{
+    if (message.size() > 4096)
+        throw std::runtime_error("MIDI 发送数据超过 4096 字节");
+
+    const auto bufferSize = sizeof(MIDIPacketList) + message.size() + 16;
+    auto* packets = static_cast<MIDIPacketList*>(std::calloc(1, bufferSize));
+    if (packets == nullptr)
+        throw std::runtime_error("无法分配 MIDI 发送缓冲区");
+
+    auto* packet = MIDIPacketListInit(packets);
+    packet = MIDIPacketListAdd(packets, bufferSize, packet, 0, message.size(), message.data());
+    if (packet == nullptr)
+    {
+        std::free(packets);
+        throw std::runtime_error("MIDIPacketListAdd 失败");
+    }
+
+    const auto status = MIDISend(outputPort, destination, packets);
+    std::free(packets);
+    check(status, "MIDISend");
+}
+
+void CoreMidiTransport::midiReadCallback(const MIDIPacketList* packets, void* readContext, void*)
+{
+    if (readContext != nullptr)
+        static_cast<CoreMidiTransport*>(readContext)->receive(packets);
+}
+
+void CoreMidiTransport::receive(const MIDIPacketList* packets)
+{
+    std::lock_guard<std::mutex> lock(mutex);
+    if (!acceptingMidi || packets == nullptr)
+        return;
+
+    auto* packet = &packets->packet[0];
+
+    for (UInt32 index = 0; index < packets->numPackets; ++index)
+    {
+        for (UInt16 byteIndex = 0; byteIndex < packet->length; ++byteIndex)
+        {
+            const auto byte = packet->data[byteIndex];
+            if (byte >= 0xf8)
+                continue;
+            if (byte == 0xf0)
+            {
+                responseBuffer = Bytes { byte };
+            }
+            else if (!responseBuffer.empty())
+            {
+                if (responseBuffer.size() >= 65536)
+                {
+                    responseBuffer.clear();
+                    continue;
+                }
+                responseBuffer.push_back(byte);
+            }
+
+            if (byte == 0xf7 && responseBuffer.size() > 1)
+            {
+                completedResponse = responseBuffer;
+                if (capturing)
+                    capturedResponses.push_back(responseBuffer);
+                responseBuffer.clear();
+                condition.notify_all();
+            }
+        }
+        packet = MIDIPacketNext(packet);
+    }
+}
+
+void CoreMidiTransport::check(OSStatus status, const std::string& operation) const
+{
+    if (status != noErr)
+        throw std::runtime_error(operation + " 失败，OSStatus " + std::to_string(status));
+}
+
+void CoreMidiTransport::close()
+{
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        acceptingMidi = false;
+    }
+
+    if (inputPort != MIDIPortRef {} && source != MIDIEndpointRef {})
+        MIDIPortDisconnectSource(inputPort, source);
+    if (inputPort != MIDIPortRef {})
+        MIDIPortDispose(inputPort);
+    if (outputPort != MIDIPortRef {})
+        MIDIPortDispose(outputPort);
+    if (client != MIDIClientRef {})
+        MIDIClientDispose(client);
+
+    client = MIDIClientRef {};
+    inputPort = MIDIPortRef {};
+    outputPort = MIDIPortRef {};
+    source = MIDIEndpointRef {};
+    destination = MIDIEndpointRef {};
+    isOpen = false;
+    selectedSourceName.clear();
+    selectedDestinationName.clear();
+}
