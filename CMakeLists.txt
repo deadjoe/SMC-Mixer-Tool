@@ -39,6 +39,7 @@ FetchContent_MakeAvailable(JUCE)
 juce_add_gui_app(SMCMixerGUI
     PRODUCT_NAME "SMC Mixer Tool"
     BUNDLE_ID "local.smc-mixer.gui"
+    ICON_BIG "${CMAKE_CURRENT_SOURCE_DIR}/Source/Assets/AppIcon.png"
     BLUETOOTH_PERMISSION_ENABLED TRUE
     BLUETOOTH_PERMISSION_TEXT "Connect to SMC-Mixer to read firmware, battery, and MIDI device information."
     NEEDS_CURL FALSE
