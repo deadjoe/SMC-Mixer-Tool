@@ -1,23 +1,35 @@
 # SMC Mixer Tool
 
-Read-only macOS tool for the M-VAVE SMC-Mixer. It reads device identity and the stored settings of every assignable control over USB-C or Bluetooth.
+macOS app for the M-VAVE SMC-Mixer. It reads the device identity and both stored profiles over USB-C or Bluetooth, edits the CC / User profile, and writes the changed records back.
 
-只读。连接调音台后，点旋钮、推子或按钮，查看该控件在快照里的配置。一次读取 6,282 字节，里面是 DAW 和 CC / User 两份存档。右上角两个按钮只切换正在查看的那一份，不改变机器当前模式。机器上的切换是按住 Shift，再按 Left 或 Right。
+## Use
 
-诊断页可以导出这份原始快照。厂商、型号、电量和信号强度只在蓝牙连接时提供。
+Connect the mixer with USB-C or Bluetooth and open the app. It reads a 6,282-byte settings image: the DAW profile, then the CC / User profile, 3,141 bytes each. Click a knob, fader, or button to see that control's stored settings. The panel only selects a control. It does not send performance MIDI.
 
-写入配置还没做，设计记在 [PLAN.md](PLAN.md)。
+CC / User and DAW on the inspector choose which stored profile is on screen. The mixer's live mode stays where it is. On the hardware, hold Shift and press Left or Right.
 
-## 构建
+In the CC / User view you can edit channel, CC, minimum, and maximum. Buttons also have value 1, value 2, and LED. Revert restores the selected control. Write sends only the records that changed, then reads those addresses back and checks them. USB-C carries the payload as SysEx on the Private port. Bluetooth sends the same payload on the vendor channel. The DAW view is read-only.
 
-需要 macOS 12、CMake 3.22 和 Xcode 命令行工具。JUCE 9.0.4 由 CMake 拉取，使用它自己的许可证。
+Export saves the profile you are viewing as JSON. Copy puts that JSON on the clipboard. Channels in the file are numbered from 1.
+
+The version next to the title is `1.0.0` plus the git commit used for the build. A dirty worktree adds `.dirty`.
+
+The gear at the upper left opens diagnostics. It reports the USB-C Private and Master ports, the Bluetooth MIDI port, and which path carries settings. A Bluetooth connection also lists manufacturer, model, battery, signal, and services. Read snapshot loads the 6,282-byte image. Export .bin saves that image.
+
+## Build
+
+macOS 12 or later, CMake 3.22, and the Xcode command-line tools. CMake fetches JUCE 9.0.4, which keeps its own license.
 
 ```
 cmake -S . -B build
+cmake --build build --target SMCMixerCoreTests
+./build/SMCMixerCoreTests
 cmake --build build --target SMCMixerGUI
 open "build/SMCMixerGUI_artefacts/Debug/SMC Mixer Tool.app"
 ```
 
-## 许可
+GitHub Actions runs the core tests and builds the app on macOS.
 
-本仓库源码以 Apache License 2.0 授权。见 [LICENSE](LICENSE)。
+## License
+
+Source in this repository is under the Apache License 2.0. See [LICENSE](LICENSE).

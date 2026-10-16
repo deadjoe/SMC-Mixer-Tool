@@ -94,6 +94,39 @@ void DeviceDiagramComponent::styleSlider(ReadOnlySlider& slider, bool rotary) co
     slider.setColour(juce::Slider::rotarySliderFillColourId, mixerui::fader);
 }
 
+void DeviceDiagramComponent::setDirtyControls(const std::vector<ControlSelection>& dirty)
+{
+    dirtyKnobs.fill(false);
+    dirtyFaders.fill(false);
+    dirtyTrackButtons.fill(false);
+    dirtyGlobalButtons.fill(false);
+    for (const auto& control : dirty)
+    {
+        if (control.index < 0)
+            continue;
+        switch (control.kind)
+        {
+            case ControlKind::knob:
+                if (control.index < static_cast<int>(dirtyKnobs.size()))
+                    dirtyKnobs[static_cast<std::size_t>(control.index)] = true;
+                break;
+            case ControlKind::slider:
+                if (control.index < static_cast<int>(dirtyFaders.size()))
+                    dirtyFaders[static_cast<std::size_t>(control.index)] = true;
+                break;
+            case ControlKind::trackButton:
+                if (control.index < static_cast<int>(dirtyTrackButtons.size()))
+                    dirtyTrackButtons[static_cast<std::size_t>(control.index)] = true;
+                break;
+            case ControlKind::globalButton:
+                if (control.index < static_cast<int>(dirtyGlobalButtons.size()))
+                    dirtyGlobalButtons[static_cast<std::size_t>(control.index)] = true;
+                break;
+        }
+    }
+    repaint();
+}
+
 void DeviceDiagramComponent::selectControl(ControlSelection selection)
 {
     selected = selection;
@@ -131,7 +164,7 @@ void DeviceDiagramComponent::paint(juce::Graphics& graphics)
     graphics.drawText("Channels", 20, 12, 140, 22, juce::Justification::centredLeft, false);
     graphics.setColour(mixerui::muted);
     graphics.setFont(MixerLookAndFeel::font(11.0f));
-    graphics.drawText("Click a control to read its stored settings", 20, 34, 340, 16,
+    graphics.drawText("Click a control. A dot marks an unsaved edit", 20, 34, 360, 16,
                       juce::Justification::centredLeft, false);
 
     const char* keyNames[] { "Knob", "Fader", "Track", "Global" };
@@ -169,6 +202,32 @@ void DeviceDiagramComponent::paint(juce::Graphics& graphics)
         graphics.setColour(mixerui::ink.withAlpha(0.85f));
         graphics.drawRoundedRectangle(bounds, 8.0f, 2.0f);
     }
+}
+
+void DeviceDiagramComponent::paintOverChildren(juce::Graphics& graphics)
+{
+    const auto drawDot = [&graphics](juce::Rectangle<int> bounds) {
+        const auto x = static_cast<float>(bounds.getRight() - 10);
+        const auto y = static_cast<float>(bounds.getY() - 1);
+        graphics.setColour(mixerui::plate);
+        graphics.fillEllipse(x - 1.5f, y - 1.5f, 11.0f, 11.0f);
+        graphics.setColour(mixerui::ink);
+        graphics.fillEllipse(x, y, 8.0f, 8.0f);
+    };
+
+    for (int index = 0; index < 8; ++index)
+    {
+        if (dirtyKnobs[static_cast<std::size_t>(index)])
+            drawDot(knobs[static_cast<std::size_t>(index)].getBounds());
+        if (dirtyFaders[static_cast<std::size_t>(index)])
+            drawDot(faders[static_cast<std::size_t>(index)].getBounds());
+    }
+    for (int index = 0; index < 32; ++index)
+        if (dirtyTrackButtons[static_cast<std::size_t>(index)])
+            drawDot(trackButtons[static_cast<std::size_t>(index)]->getBounds());
+    for (int index = 0; index < 11; ++index)
+        if (dirtyGlobalButtons[static_cast<std::size_t>(index)])
+            drawDot(globalButtons[static_cast<std::size_t>(index)]->getBounds());
 }
 
 void DeviceDiagramComponent::resized()

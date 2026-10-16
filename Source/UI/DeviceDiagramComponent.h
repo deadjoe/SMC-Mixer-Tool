@@ -7,6 +7,7 @@
 #include <array>
 #include <functional>
 #include <memory>
+#include <vector>
 
 class ReadOnlySlider final : public juce::Slider
 {
@@ -26,7 +27,9 @@ public:
 
     std::function<void(ControlSelection)> onControlSelected;
 
+    void setDirtyControls(const std::vector<ControlSelection>& dirty);
     void paint(juce::Graphics& graphics) override;
+    void paintOverChildren(juce::Graphics& graphics) override;
     void resized() override;
 
 private:
@@ -43,4 +46,8 @@ private:
     juce::Rectangle<int> globalRowBounds;
     ControlSelection selected;
     bool hasSelection = false;
+    std::array<bool, 8> dirtyKnobs {};
+    std::array<bool, 8> dirtyFaders {};
+    std::array<bool, 32> dirtyTrackButtons {};
+    std::array<bool, 11> dirtyGlobalButtons {};
 };

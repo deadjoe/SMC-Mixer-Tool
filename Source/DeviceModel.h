@@ -50,3 +50,9 @@ struct SettingsReadResult
     int acknowledgementCount = 0;
     TransportKind transport = TransportKind::usbC;
 };
+
+struct SettingsSpan
+{
+    std::uint32_t address = 0;
+    Bytes data;
+};

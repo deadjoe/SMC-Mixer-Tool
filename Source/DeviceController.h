@@ -6,8 +6,10 @@
 #include <JuceHeader.h>
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <deque>
+#include <functional>
 #include <mutex>
 #include <vector>
 
@@ -18,14 +20,17 @@ struct DeviceEvent
         snapshotReady,
         settingsProgress,
         settingsReady,
+        settingsWritten,
         operationFailed
     };
 
     Kind kind = Kind::operationFailed;
     TransportKind transport = TransportKind::usbC;
     bool settingsOperation = false;
+    bool writeOperation = false;
     DeviceSnapshot snapshot;
     SettingsReadResult settings;
+    std::vector<SettingsSpan> written;
     double progress = 0.0;
     std::string message;
 };
@@ -38,6 +43,7 @@ public:
 
     bool requestRefresh(TransportKind transport);
     bool requestSettings(TransportKind transport);
+    bool requestWrite(TransportKind transport, std::vector<SettingsSpan> spans);
     bool isBusy() const;
     std::vector<DeviceEvent> pollEvents();
     void shutdown();
@@ -46,19 +52,27 @@ private:
     enum class RequestKind
     {
         refresh,
-        settings
+        settings,
+        write
     };
 
     struct Request
     {
         RequestKind kind = RequestKind::refresh;
         TransportKind transport = TransportKind::usbC;
+        std::vector<SettingsSpan> spans;
     };
 
     void run() override;
     bool enqueue(Request request);
     void executeRefresh(TransportKind transport);
     void executeSettings(TransportKind transport);
+    void executeWrite(TransportKind transport, const std::vector<SettingsSpan>& spans);
+    std::vector<Bytes> exchange(TransportKind transport,
+                                const Bytes& payload,
+                                std::chrono::milliseconds usbWindow,
+                                double bluetoothTimeoutSeconds,
+                                const std::function<bool(const std::vector<Bytes>&)>& ready = {});
     void emit(DeviceEvent event);
 
     mutable std::mutex mutex;

@@ -1,12 +1,42 @@
 #include "DeviceController.h"
 
 #include "BleTransport.h"
+#include "ControlConfiguration.h"
 #include "SettingsProtocol.h"
 #include "VendorProtocol.h"
 
 #include <algorithm>
 #include <iterator>
+#include <string>
 #include <utility>
+
+namespace
+{
+bool chunkReady(const std::vector<Bytes>& messages, std::uint32_t address, std::uint32_t length)
+{
+    try
+    {
+        return SettingsProtocol::parseChunk(messages, address, length).size() == length;
+    }
+    catch (const std::exception&)
+    {
+        return false;
+    }
+}
+
+bool acknowledgementReady(const std::vector<Bytes>& messages)
+{
+    try
+    {
+        SettingsProtocol::parseWriteAcknowledgement(messages);
+        return true;
+    }
+    catch (const std::exception& error)
+    {
+        return std::string(error.what()).find("No write acknowledgement") == std::string::npos;
+    }
+}
+}
 
 DeviceController::DeviceController()
     : juce::Thread("SMC Mixer Device Worker")
@@ -21,12 +51,17 @@ DeviceController::~DeviceController()
 
 bool DeviceController::requestRefresh(TransportKind transport)
 {
-    return enqueue({ RequestKind::refresh, transport });
+    return enqueue({ RequestKind::refresh, transport, {} });
 }
 
 bool DeviceController::requestSettings(TransportKind transport)
 {
-    return enqueue({ RequestKind::settings, transport });
+    return enqueue({ RequestKind::settings, transport, {} });
+}
+
+bool DeviceController::requestWrite(TransportKind transport, std::vector<SettingsSpan> spans)
+{
+    return enqueue({ RequestKind::write, transport, std::move(spans) });
 }
 
 bool DeviceController::enqueue(Request request)
@@ -86,8 +121,10 @@ void DeviceController::run()
         {
             if (request.kind == RequestKind::refresh)
                 executeRefresh(request.transport);
-            else
+            else if (request.kind == RequestKind::settings)
                 executeSettings(request.transport);
+            else
+                executeWrite(request.transport, request.spans);
         }
         catch (const std::exception& error)
         {
@@ -96,7 +133,8 @@ void DeviceController::run()
                 DeviceEvent event;
                 event.kind = DeviceEvent::Kind::operationFailed;
                 event.transport = request.transport;
-                event.settingsOperation = request.kind == RequestKind::settings;
+                event.settingsOperation = request.kind != RequestKind::refresh;
+                event.writeOperation = request.kind == RequestKind::write;
                 event.message = error.what();
                 emit(std::move(event));
             }
@@ -108,8 +146,9 @@ void DeviceController::run()
                 DeviceEvent event;
                 event.kind = DeviceEvent::Kind::operationFailed;
                 event.transport = request.transport;
-                event.settingsOperation = request.kind == RequestKind::settings;
-                event.message = "发生未知设备通讯错误";
+                event.settingsOperation = request.kind != RequestKind::refresh;
+                event.writeOperation = request.kind == RequestKind::write;
+                event.message = "Unexpected device communication error";
                 emit(std::move(event));
             }
         }
@@ -135,8 +174,8 @@ void DeviceController::executeRefresh(TransportKind transport)
     }
     else
     {
-        snapshot.sourceName = "未连接";
-        snapshot.destinationName = "未连接";
+        snapshot.sourceName = "Not found";
+        snapshot.destinationName = "Not found";
     }
 
     if (transport == TransportKind::usbC)
@@ -192,7 +231,10 @@ void DeviceController::executeSettings(TransportKind transport)
             auto part = midi.sendAndCapture(transport,
                                              SettingsProtocol::readSysEx(5, address, length),
                                              std::chrono::milliseconds { 2000 },
-                                             &stop);
+                                             &stop,
+                                             [&](const std::vector<Bytes>& messages) {
+                                                 return chunkReady(messages, address, length);
+                                             });
             responses.insert(responses.end(),
                              std::make_move_iterator(part.begin()),
                              std::make_move_iterator(part.end()));
@@ -211,7 +253,8 @@ void DeviceController::executeSettings(TransportKind transport)
         : SettingsProtocol::parsePayloads(responses);
     result.transport = transport;
     if (result.data.size() != totalLength)
-        throw std::runtime_error("设置快照长度应为 6282 字节，实际为 " + std::to_string(result.data.size()));
+        throw std::runtime_error("Settings snapshot should be 6282 bytes, received "
+                                 + std::to_string(result.data.size()));
 
     DeviceEvent progressEvent;
     progressEvent.kind = DeviceEvent::Kind::settingsProgress;
@@ -225,6 +268,128 @@ void DeviceController::executeSettings(TransportKind transport)
     event.transport = transport;
     event.settingsOperation = true;
     event.settings = std::move(result);
+    emit(std::move(event));
+}
+
+std::vector<Bytes> DeviceController::exchange(TransportKind transport,
+                                                 const Bytes& payload,
+                                                 std::chrono::milliseconds usbWindow,
+                                                 double bluetoothTimeoutSeconds,
+                                                 const std::function<bool(const std::vector<Bytes>&)>& ready)
+{
+    // Both links carry the same vendor payload. USB-C frames it as SysEx on the open
+    // Private port and returns once the expected reply is in. Bluetooth sends it once on AE41.
+    if (transport == TransportKind::usbC)
+        return midi.sendAndCapture(transport, SettingsProtocol::sysEx(payload), usbWindow, &stop, ready);
+
+    return { BleTransport::queryVendor(payload, bluetoothTimeoutSeconds, &stop) };
+}
+
+void DeviceController::executeWrite(TransportKind transport, const std::vector<SettingsSpan>& spans)
+{
+    if (spans.empty())
+        throw std::runtime_error("There are no changed records to write");
+
+    for (const auto& span : spans)
+    {
+        const auto size = span.data.size();
+        const auto validSize = size == layout::knobSize || size == layout::sliderSize || size == layout::buttonSize;
+        if (!validSize || static_cast<std::uint64_t>(span.address) + size > layout::snapshotSize)
+            throw std::runtime_error("A changed record has an invalid address or length");
+    }
+
+    const auto steps = spans.size() * 2;
+    std::size_t step = 0;
+    const auto report = [&](std::size_t completed) {
+        DeviceEvent progressEvent;
+        progressEvent.kind = DeviceEvent::Kind::settingsProgress;
+        progressEvent.transport = transport;
+        progressEvent.settingsOperation = true;
+        progressEvent.writeOperation = true;
+        progressEvent.progress = static_cast<double>(completed) / static_cast<double>(steps);
+        emit(std::move(progressEvent));
+    };
+
+    std::vector<SettingsSpan> verified;
+    verified.reserve(spans.size());
+    for (const auto& span : spans)
+    {
+        if (threadShouldExit() || stop.load())
+            return;
+        report(step);
+
+        bool acknowledged = false;
+        std::string lastError = "No write acknowledgement was received";
+        for (int attempt = 0; attempt < 2 && !acknowledged; ++attempt)
+        {
+            if (threadShouldExit() || stop.load())
+                return;
+            try
+            {
+                const auto messages = exchange(transport,
+                                                SettingsProtocol::writePayload(span.address, span.data),
+                                                std::chrono::milliseconds { 1000 },
+                                                12.0,
+                                                acknowledgementReady);
+                SettingsProtocol::parseWriteAcknowledgement(messages);
+                acknowledged = true;
+            }
+            catch (const std::exception& error)
+            {
+                lastError = error.what();
+                if (lastError.find("rejected the write") != std::string::npos)
+                    throw;
+            }
+        }
+        if (!acknowledged)
+            throw std::runtime_error(lastError);
+        ++step;
+
+        report(step);
+        Bytes readBack;
+        std::string readError = "No read-back data was received";
+        for (int attempt = 0; attempt < 2 && readBack.empty(); ++attempt)
+        {
+            if (threadShouldExit() || stop.load())
+                return;
+            try
+            {
+                const auto messages = exchange(transport,
+                                                SettingsProtocol::readPayload(5, span.address,
+                                                                              static_cast<std::uint32_t>(span.data.size())),
+                                                std::chrono::milliseconds { 1500 },
+                                                12.0,
+                                                [&](const std::vector<Bytes>& replies) {
+                                                    return chunkReady(replies,
+                                                                      span.address,
+                                                                      static_cast<std::uint32_t>(span.data.size()));
+                                                });
+                readBack = SettingsProtocol::parseChunk(messages, span.address,
+                                                         static_cast<std::uint32_t>(span.data.size()));
+            }
+            catch (const std::exception& error)
+            {
+                readError = error.what();
+            }
+        }
+        if (readBack != span.data)
+            throw std::runtime_error(readBack.empty()
+                                         ? readError
+                                         : "Read-back does not match the bytes that were sent");
+        verified.push_back(span);
+        ++step;
+    }
+
+    if (threadShouldExit() || stop.load())
+        return;
+
+    report(steps);
+    DeviceEvent event;
+    event.kind = DeviceEvent::Kind::settingsWritten;
+    event.transport = transport;
+    event.settingsOperation = true;
+    event.writeOperation = true;
+    event.written = std::move(verified);
     emit(std::move(event));
 }
 

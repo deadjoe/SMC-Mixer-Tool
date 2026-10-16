@@ -106,7 +106,7 @@ Bytes VendorProtocol::versionQuerySysEx()
 VersionInfo VendorProtocol::parseVersionResponse(const Bytes& message)
 {
     if (message.size() < 3 || message.front() != 0xf0 || message.back() != 0xf7)
-        throw std::runtime_error("版本响应不是完整的 F0...F7 SysEx 消息");
+        throw std::runtime_error("Version reply is not a complete F0...F7 SysEx message");
 
     return parseVersionPayload(decode7To8(Bytes(message.begin() + 1, message.end() - 1)));
 }
@@ -114,24 +114,24 @@ VersionInfo VendorProtocol::parseVersionResponse(const Bytes& message)
 VersionInfo VendorProtocol::parseVersionPayload(const Bytes& payload)
 {
     if (payload.size() < 7)
-        throw std::runtime_error("厂商响应短于 7 字节头部");
+        throw std::runtime_error("Vendor reply is shorter than its 7-byte header");
     if (payload[0] != 0x00 || payload[1] != 0x59)
-        throw std::runtime_error("厂商响应头部不匹配");
+        throw std::runtime_error("Vendor reply header does not match");
     if (payload[2] != 0x11)
-        throw std::runtime_error("版本响应命令不匹配：" + byteLabel(payload[2]));
+        throw std::runtime_error("Version reply command does not match: " + byteLabel(payload[2]));
 
     const auto dataLength = read24(payload, 3);
     if (payload.size() != static_cast<std::size_t>(dataLength + 7))
-        throw std::runtime_error("版本响应声明长度与实际负载不一致");
+        throw std::runtime_error("Version reply length does not match its payload");
     if (dataLength < 9)
-        throw std::runtime_error("版本响应数据过短");
+        throw std::runtime_error("Version reply data is too short");
 
     const Bytes data(payload.begin() + 6, payload.begin() + 6 + dataLength);
     const auto expectedChecksum = checksum(data);
     const auto actualChecksum = payload[static_cast<std::size_t>(6 + dataLength)];
     if (actualChecksum != expectedChecksum)
-        throw std::runtime_error("校验和不匹配：期望 " + byteLabel(expectedChecksum)
-                                 + "，实际 " + byteLabel(actualChecksum));
+        throw std::runtime_error("Checksum mismatch: expected " + byteLabel(expectedChecksum)
+                                 + ", received " + byteLabel(actualChecksum));
 
     const auto textEnd = std::find(data.begin(), data.end(), 0);
     const auto visibleText = trim(std::string(data.begin(), textEnd));
@@ -172,7 +172,7 @@ VersionInfo VendorProtocol::parseVersionPayload(const Bytes& payload)
         digits += std::to_string(static_cast<int>(byte));
     }
     if (digits.empty())
-        throw std::runtime_error("响应通过校验，但没有可识别的数字版本字段");
+        throw std::runtime_error("The reply passed its checksum, but it has no numeric version");
 
     VersionInfo info;
     info.deviceName = visibleText;

@@ -3,6 +3,25 @@ cmake_minimum_required(VERSION 3.22)
 set(CMAKE_OSX_DEPLOYMENT_TARGET "12.0" CACHE STRING "Minimum macOS version" FORCE)
 project(SMCMixerToolGUI VERSION 1.0.0 LANGUAGES C CXX OBJCXX)
 
+find_package(Git QUIET)
+set(SMC_BUILD_INFO "${CMAKE_BINARY_DIR}/generated/BuildInfo.h")
+add_custom_target(SMCBuildInfo
+    COMMAND ${CMAKE_COMMAND}
+        -DSOURCE_DIR=${CMAKE_SOURCE_DIR}
+        -DOUTPUT=${SMC_BUILD_INFO}
+        -DGIT_EXECUTABLE=${GIT_EXECUTABLE}
+        -P ${CMAKE_SOURCE_DIR}/cmake/WriteBuildInfo.cmake
+    BYPRODUCTS ${SMC_BUILD_INFO}
+    VERBATIM
+)
+execute_process(
+    COMMAND ${CMAKE_COMMAND}
+        -DSOURCE_DIR=${CMAKE_SOURCE_DIR}
+        -DOUTPUT=${SMC_BUILD_INFO}
+        -DGIT_EXECUTABLE=${GIT_EXECUTABLE}
+        -P ${CMAKE_SOURCE_DIR}/cmake/WriteBuildInfo.cmake
+)
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -45,6 +64,8 @@ target_sources(SMCMixerGUI PRIVATE
     Source/BleTransport.mm
     Source/ControlConfiguration.h
     Source/ControlConfiguration.cpp
+    Source/SettingsDocument.h
+    Source/SettingsDocument.cpp
     Source/UI/ControlInspectorComponent.h
     Source/UI/ControlInspectorComponent.cpp
     Source/UI/MixerLookAndFeel.h
@@ -78,3 +99,17 @@ target_link_libraries(SMCMixerGUI PRIVATE
     ${CORE_BLUETOOTH_FRAMEWORK}
     ${FOUNDATION_FRAMEWORK}
 )
+
+target_include_directories(SMCMixerGUI PRIVATE "${CMAKE_BINARY_DIR}/generated")
+add_dependencies(SMCMixerGUI SMCBuildInfo)
+
+add_executable(SMCMixerCoreTests
+    tests/core_tests.cpp
+    Source/VendorProtocol.cpp
+    Source/SettingsProtocol.cpp
+    Source/ControlConfiguration.cpp
+    Source/SettingsDocument.cpp
+)
+target_include_directories(SMCMixerCoreTests PRIVATE Source)
+target_compile_features(SMCMixerCoreTests PRIVATE cxx_std_17)
+target_compile_options(SMCMixerCoreTests PRIVATE -Wall -Wextra -Wpedantic)

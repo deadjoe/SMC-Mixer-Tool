@@ -125,7 +125,7 @@ CBUUID* uuid(NSString* value)
     {
         if (manager.state != CBManagerStateUnknown)
         {
-            NSString* message = [NSString stringWithFormat:@"蓝牙不可用（状态 %ld，授权 %ld），请检查 macOS 蓝牙权限",
+            NSString* message = [NSString stringWithFormat:@"Bluetooth is unavailable (state %ld, authorization %ld). Check the macOS Bluetooth permission.",
                                  (long)manager.state, (long)CBManager.authorization];
             [self finishWithError:message];
         }
@@ -226,7 +226,7 @@ CBUUID* uuid(NSString* value)
 {
     if (error != nil)
     {
-        [self finishWithError:[NSString stringWithFormat:@"GATT 服务发现失败：%@", error.localizedDescription]];
+        [self finishWithError:[NSString stringWithFormat:@"GATT service discovery failed: %@", error.localizedDescription]];
         return;
     }
 
@@ -240,7 +240,7 @@ CBUUID* uuid(NSString* value)
         }
         if (service == nil)
         {
-            [self finishWithError:@"设备未提供 AE40 私有服务"];
+            [self finishWithError:@"The mixer has no AE40 vendor service"];
             return;
         }
         [device discoverCharacteristics:@[ uuid(@"AE41"), uuid(@"AE42") ] forService:service];
@@ -256,7 +256,7 @@ CBUUID* uuid(NSString* value)
         [device discoverCharacteristics:nil forService:service];
     }
     if (services.count == 0)
-        [self finishWithError:@"蓝牙设备没有发现任何 GATT 服务"];
+        [self finishWithError:@"The mixer did not expose any GATT services"];
 }
 
 - (void)peripheral:(CBPeripheral*)device
@@ -265,7 +265,7 @@ CBUUID* uuid(NSString* value)
 {
     if (error != nil)
     {
-        [self finishWithError:[NSString stringWithFormat:@"GATT 特征发现失败：%@", error.localizedDescription]];
+        [self finishWithError:[NSString stringWithFormat:@"GATT characteristic discovery failed: %@", error.localizedDescription]];
         return;
     }
 
@@ -279,7 +279,7 @@ CBUUID* uuid(NSString* value)
                 return;
             }
         }
-        [self finishWithError:@"AE40 服务缺少 AE42 通知特征"];
+        [self finishWithError:@"Vendor service AE40 has no AE42 notify characteristic"];
         return;
     }
 
@@ -305,7 +305,7 @@ CBUUID* uuid(NSString* value)
         return;
     if (error != nil)
     {
-        [self finishWithError:[NSString stringWithFormat:@"AE42 订阅失败：%@", error.localizedDescription]];
+        [self finishWithError:[NSString stringWithFormat:@"Could not subscribe to AE42: %@", error.localizedDescription]];
         return;
     }
 
@@ -317,12 +317,35 @@ CBUUID* uuid(NSString* value)
     }
     if (writeCharacteristic == nil)
     {
-        [self finishWithError:@"AE40 服务缺少 AE41 写入特征"];
+        [self finishWithError:@"Vendor service AE40 has no AE41 write characteristic"];
+        return;
+    }
+    if ((writeCharacteristic.properties & CBCharacteristicPropertyWriteWithoutResponse) == 0)
+    {
+        [self finishWithError:@"AE41 does not accept writes without response"];
+        return;
+    }
+
+    const auto maximum = [device maximumWriteValueLengthForType:CBCharacteristicWriteWithoutResponse];
+    if (vendorQuery.length > maximum)
+    {
+        [self finishWithError:[NSString stringWithFormat:@"Bluetooth write is %lu bytes, above the current limit of %lu",
+                               (unsigned long)vendorQuery.length, (unsigned long)maximum]];
         return;
     }
 
     operationState->response.clear();
     [device writeValue:vendorQuery forCharacteristic:writeCharacteristic type:CBCharacteristicWriteWithoutResponse];
+}
+
+- (void)peripheral:(CBPeripheral*)device
+ didWriteValueForCharacteristic:(CBCharacteristic*)characteristic
+             error:(NSError*)error
+{
+    if (healthMode || error == nil || [self hasFinished])
+        return;
+    NSString* detail = error.localizedDescription != nil ? error.localizedDescription : @"Write failed";
+    [self finishWithError:[NSString stringWithFormat:@"Bluetooth write failed: %@", detail]];
 }
 
 - (void)peripheral:(CBPeripheral*)device
@@ -336,7 +359,7 @@ CBUUID* uuid(NSString* value)
             return;
         if (error != nil)
         {
-            [self finishWithError:[NSString stringWithFormat:@"AE42 响应失败：%@", error.localizedDescription]];
+            [self finishWithError:[NSString stringWithFormat:@"AE42 reply failed: %@", error.localizedDescription]];
             return;
         }
 
@@ -351,7 +374,7 @@ CBUUID* uuid(NSString* value)
             return;
         if (response[0] != 0x00 || response[1] != 0x59)
         {
-            [self finishWithError:@"厂商响应头部不匹配"];
+            [self finishWithError:@"Vendor reply header does not match"];
             return;
         }
         const int dataLength = static_cast<int>(response[3])
@@ -359,7 +382,7 @@ CBUUID* uuid(NSString* value)
                              | (static_cast<int>(response[5]) << 16);
         if (dataLength > 8192)
         {
-            [self finishWithError:@"厂商响应长度异常"];
+            [self finishWithError:@"Vendor reply length is not valid"];
             return;
         }
         const auto expectedLength = static_cast<std::size_t>(dataLength + 7);
@@ -439,8 +462,8 @@ Result runOperation(const Bytes* query,
         if (!completed)
         {
             const auto cancelled = stop != nullptr && stop->load();
-            state.failure = cancelled ? "操作已取消"
-                                      : healthMode ? "读取蓝牙健康信息超时" : "等待 AE42 厂商响应超时";
+            state.failure = cancelled ? "Cancelled"
+                                      : healthMode ? "Bluetooth health data timed out" : "Timed out waiting for the AE42 vendor reply";
             state.finished = true;
         }
         lock.unlock();
@@ -457,7 +480,7 @@ Bytes BleTransport::queryVendor(const Bytes& query, double timeoutSeconds, const
 {
     return runOperation<Bytes>(&query, false, timeoutSeconds, stop, [](OperationState& state) {
         if (state.response.empty())
-            throw std::runtime_error("AE42 返回了空负载");
+            throw std::runtime_error("AE42 returned an empty payload");
         return state.response;
     });
 }

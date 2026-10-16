@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build
+
+      - name: Core tests
+        run: cmake --build build --target SMCMixerCoreTests -j 4
+
+      - name: Run core tests
+        run: ./build/SMCMixerCoreTests
+
+      - name: Build the app
+        run: cmake --build build --target SMCMixerGUI -j 4

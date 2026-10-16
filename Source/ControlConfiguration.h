@@ -12,6 +12,31 @@ enum class DeviceProfile
     ccUser = 1
 };
 
+enum class EditableField
+{
+    channel,
+    cc,
+    minimum,
+    maximum,
+    value1,
+    value2,
+    led
+};
+
+namespace layout
+{
+constexpr std::size_t profileSize = 3141;
+constexpr std::size_t buttonCount = 43;
+constexpr std::size_t buttonSize = 71;
+constexpr std::size_t knobCount = 8;
+constexpr std::size_t knobSize = 6;
+constexpr std::size_t sliderCount = 8;
+constexpr std::size_t sliderSize = 5;
+constexpr std::size_t knobsOffset = buttonCount * buttonSize;
+constexpr std::size_t slidersOffset = knobsOffset + knobCount * knobSize;
+constexpr std::size_t snapshotSize = profileSize * 2;
+}
+
 enum class ControlKind
 {
     knob,
@@ -74,6 +99,7 @@ struct ControlConfiguration
 
     static ControlConfiguration parse(const Bytes& data);
     const ControlProfile& profile(DeviceProfile profile) const;
+    std::string toJson(DeviceProfile profile) const;
 };
 
 std::string controlDisplayName(ControlSelection selection);

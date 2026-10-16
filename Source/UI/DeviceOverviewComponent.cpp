@@ -31,6 +31,18 @@ DeviceOverviewComponent::DeviceOverviewComponent()
 
     diagram.onControlSelected = [this](ControlSelection selection) { inspector.selectControl(selection); };
     inspector.onSettingsRequired = [this] { if (onSettingsRequired) onSettingsRequired(); };
+    inspector.onControlEdited = [this](ControlSelection selection, DeviceProfile profile, EditableField field, std::uint8_t value) {
+        if (onControlEdited)
+            onControlEdited(selection, profile, field, value);
+    };
+    inspector.onRevertRequested = [this](ControlSelection selection, DeviceProfile profile) {
+        if (onRevertRequested)
+            onRevertRequested(selection, profile);
+    };
+    inspector.onWriteRequested = [this] { if (onWriteRequested) onWriteRequested(); };
+    inspector.isRecordDirty = [this](ControlSelection selection, DeviceProfile profile) {
+        return isRecordDirty && isRecordDirty(selection, profile);
+    };
     clear(TransportKind::usbC);
 }
 
@@ -60,6 +72,7 @@ void DeviceOverviewComponent::clear(TransportKind transport)
     warningLabel.setVisible(false);
     batteryBar.setVisible(false);
     inspector.clearConfiguration();
+    diagram.setDirtyControls({});
     repaint();
 }
 
@@ -105,14 +118,32 @@ void DeviceOverviewComponent::setSnapshot(const DeviceSnapshot& snapshot)
     repaint();
 }
 
-void DeviceOverviewComponent::setSettings(const SettingsReadResult& settings)
+void DeviceOverviewComponent::showWorkingCopy(const ControlConfiguration& configuration,
+                                              const std::vector<ControlSelection>& dirty,
+                                              bool editingEnabled)
 {
-    inspector.setConfiguration(ControlConfiguration::parse(settings.data));
+    inspector.setEditingEnabled(editingEnabled);
+    inspector.setDirtyControls(dirty);
+    diagram.setDirtyControls(dirty);
+    inspector.setConfiguration(configuration);
+}
+
+void DeviceOverviewComponent::cacheWorkingCopy(const ControlConfiguration& configuration,
+                                               const std::vector<ControlSelection>& dirty)
+{
+    inspector.setDirtyControls(dirty);
+    diagram.setDirtyControls(dirty);
+    inspector.cacheConfiguration(configuration);
 }
 
 void DeviceOverviewComponent::setSettingsLoading(bool loading, double progress)
 {
     inspector.setLoading(loading, progress);
+}
+
+void DeviceOverviewComponent::setSettingsWriting(bool writing, double progress)
+{
+    inspector.setWriting(writing, progress);
 }
 
 void DeviceOverviewComponent::setSettingsError(const juce::String& message)
@@ -147,7 +178,7 @@ void DeviceOverviewComponent::resized()
     auto area = getLocalBounds().reduced(20, 16);
     identityCard = area.removeFromTop(104);
     area.removeFromTop(12);
-    inspectorArea = area.removeFromBottom(168);
+    inspectorArea = area.removeFromBottom(200);
     area.removeFromBottom(12);
     diagram.setBounds(area);
     inspector.setBounds(inspectorArea);

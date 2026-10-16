@@ -5,7 +5,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <stdexcept>
-#include <thread>
 
 namespace
 {
@@ -137,7 +136,7 @@ Bytes CoreMidiTransport::query(TransportKind transport,
     while (std::chrono::steady_clock::now() < deadline)
     {
         if (stop != nullptr && stop->load())
-            throw std::runtime_error("操作已取消");
+            throw std::runtime_error("Cancelled");
         received = condition.wait_for(lock, std::chrono::milliseconds(200), [this] {
             return completedResponse.has_value();
         });
@@ -145,18 +144,20 @@ Bytes CoreMidiTransport::query(TransportKind transport,
             break;
     }
     if (stop != nullptr && stop->load())
-        throw std::runtime_error("操作已取消");
+        throw std::runtime_error("Cancelled");
     if (!received)
-        throw std::runtime_error("等待厂商 MIDI 响应超时，请检查设备连接和传输方式");
+        throw std::runtime_error("The mixer did not answer on this link. Check the connection and try again.");
     if (!completedResponse || completedResponse->empty())
-        throw std::runtime_error("收到了空的厂商 MIDI 响应");
+        throw std::runtime_error("The mixer returned an empty reply");
     return *completedResponse;
 }
 
 std::vector<Bytes> CoreMidiTransport::sendAndCapture(TransportKind transport,
                                                      const Bytes& message,
                                                      std::chrono::milliseconds duration,
-                                                     const std::atomic<bool>* stop)
+                                                     const std::atomic<bool>* stop,
+                                                     const std::function<bool(const std::vector<Bytes>&)>& ready,
+                                                     std::chrono::milliseconds quiet)
 {
     open(transport);
     {
@@ -170,16 +171,38 @@ std::vector<Bytes> CoreMidiTransport::sendAndCapture(TransportKind transport,
     try
     {
         send(message);
+        std::unique_lock<std::mutex> lock(mutex);
         const auto deadline = std::chrono::steady_clock::now() + duration;
+        std::size_t seen = 0;
+        auto quietDeadline = std::chrono::steady_clock::time_point::max();
         while (std::chrono::steady_clock::now() < deadline)
         {
             if (stop != nullptr && stop->load())
-                throw std::runtime_error("操作已取消");
-            const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
-                deadline - std::chrono::steady_clock::now());
-            if (remaining.count() <= 0)
-                break;
-            std::this_thread::sleep_for(std::min(remaining, std::chrono::milliseconds(200)));
+                throw std::runtime_error("Cancelled");
+
+            const auto now = std::chrono::steady_clock::now();
+            const auto enough = static_cast<bool>(ready) && ready(capturedResponses);
+            if (enough)
+            {
+                if (quiet.count() <= 0)
+                    break;
+                if (capturedResponses.size() != seen
+                    || quietDeadline == std::chrono::steady_clock::time_point::max())
+                {
+                    seen = capturedResponses.size();
+                    quietDeadline = now + quiet;
+                }
+                if (now >= quietDeadline)
+                    break;
+                condition.wait_until(lock, std::min(deadline, quietDeadline));
+                continue;
+            }
+
+            quietDeadline = std::chrono::steady_clock::time_point::max();
+            seen = capturedResponses.size();
+            condition.wait_until(lock, std::min(deadline, now + std::chrono::milliseconds(200)), [&] {
+                return capturedResponses.size() != seen || (stop != nullptr && stop->load());
+            });
         }
     }
     catch (...)
@@ -206,8 +229,8 @@ void CoreMidiTransport::open(TransportKind transport)
     if (!findEndpoints(transport, selectedSource, selectedDestination))
     {
         if (transport == TransportKind::usbC)
-            throw std::runtime_error("未找到 SMC-Mixer USB-C MIDI 端点，请检查线缆和设备电源");
-        throw std::runtime_error("未找到 SMC-Mixer 蓝牙 MIDI 端点，请先在“音频 MIDI 设置”中连接设备");
+            throw std::runtime_error("SMC-Mixer USB-C port not found. Check the cable and power.");
+        throw std::runtime_error("SMC-Mixer Bluetooth MIDI port not found. Connect it in Audio MIDI Setup.");
     }
 
     openTransport = transport;
@@ -243,19 +266,19 @@ void CoreMidiTransport::open(TransportKind transport)
 void CoreMidiTransport::send(const Bytes& message)
 {
     if (message.size() > 4096)
-        throw std::runtime_error("MIDI 发送数据超过 4096 字节");
+        throw std::runtime_error("MIDI message is longer than 4096 bytes");
 
     const auto bufferSize = sizeof(MIDIPacketList) + message.size() + 16;
     auto* packets = static_cast<MIDIPacketList*>(std::calloc(1, bufferSize));
     if (packets == nullptr)
-        throw std::runtime_error("无法分配 MIDI 发送缓冲区");
+        throw std::runtime_error("Could not allocate the MIDI send buffer");
 
     auto* packet = MIDIPacketListInit(packets);
     packet = MIDIPacketListAdd(packets, bufferSize, packet, 0, message.size(), message.data());
     if (packet == nullptr)
     {
         std::free(packets);
-        throw std::runtime_error("MIDIPacketListAdd 失败");
+        throw std::runtime_error("MIDIPacketListAdd failed");
     }
 
     const auto status = MIDISend(outputPort, destination, packets);
@@ -314,7 +337,7 @@ void CoreMidiTransport::receive(const MIDIPacketList* packets)
 void CoreMidiTransport::check(OSStatus status, const std::string& operation) const
 {
     if (status != noErr)
-        throw std::runtime_error(operation + " 失败，OSStatus " + std::to_string(status));
+        throw std::runtime_error(operation + " failed, OSStatus " + std::to_string(status));
 }
 
 void CoreMidiTransport::close()

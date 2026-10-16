@@ -44,6 +44,22 @@ private:
 
         void closeButtonPressed() override
         {
+            if (auto* main = dynamic_cast<MainComponent*>(getContentComponent()))
+            {
+                if (main->hasUnsavedEdits())
+                {
+                    const auto quit = juce::AlertWindow::showOkCancelBox(
+                        juce::MessageBoxIconType::WarningIcon,
+                        "Unsaved edits",
+                        "Quit and discard CC / User edits that have not been written?",
+                        "Quit",
+                        "Stay",
+                        this,
+                        nullptr);
+                    if (!quit)
+                        return;
+                }
+            }
             juce::JUCEApplication::getInstance()->systemRequestedQuit();
         }
     };

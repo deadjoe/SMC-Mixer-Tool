@@ -7,6 +7,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -44,7 +45,9 @@ public:
     std::vector<Bytes> sendAndCapture(TransportKind transport,
                                       const Bytes& message,
                                       std::chrono::milliseconds duration = std::chrono::milliseconds { 2000 },
-                                      const std::atomic<bool>* stop = nullptr);
+                                      const std::atomic<bool>* stop = nullptr,
+                                      const std::function<bool(const std::vector<Bytes>&)>& ready = {},
+                                      std::chrono::milliseconds quiet = std::chrono::milliseconds { 50 });
 
     const std::string& connectedSourceName() const noexcept { return selectedSourceName; }
     const std::string& connectedDestinationName() const noexcept { return selectedDestinationName; }
