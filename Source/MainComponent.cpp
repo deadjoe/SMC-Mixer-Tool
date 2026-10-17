@@ -447,11 +447,12 @@ void MainComponent::handleEvent(DeviceEvent event)
             catch (const std::exception& error)
             {
                 publishDocument(true);
-                overview.setSettingsError("Settings write failed. Read the snapshot again before editing further.");
+                overview.setSettingsError("The mixer saved the write, but it no longer matches the edits on screen."
+                                          " Read the snapshot again.");
                 statusLabel.setColour(juce::Label::textColourId, mixerui::error);
                 statusLabel.setText("WRITE FAILED", juce::dontSendNotification);
                 detailLabel.setColour(juce::Label::textColourId, mixerui::error);
-                detailLabel.setText("Settings write failed. Read the snapshot again before editing further.",
+                detailLabel.setText("Saved, but the edits on screen differ. Read the snapshot again.",
                                     juce::dontSendNotification);
                 detailLabel.setTooltip(mixerui::utf8(error.what()));
             }
@@ -463,7 +464,7 @@ void MainComponent::handleEvent(DeviceEvent event)
             if (event.writeOperation)
                 publishDocument(true);
             const auto summary = event.writeOperation
-                ? juce::String("Settings write failed. Read the snapshot again before editing further.")
+                ? juce::String("Settings write failed. Your edits are kept, so Write can try again.")
                 : event.settingsOperation
                     ? juce::String("Settings read failed. Check the connection and retry.")
                     : event.transport == TransportKind::bluetooth
@@ -472,9 +473,7 @@ void MainComponent::handleEvent(DeviceEvent event)
             auto detail = summary;
             if (!event.message.empty())
                 detail += "\n" + mixerui::utf8(event.message);
-            auto visible = event.message.empty() ? summary : mixerui::utf8(event.message);
-            if (event.writeOperation && !event.message.empty())
-                visible += " Read the snapshot again before editing further.";
+            const auto visible = event.message.empty() ? summary : mixerui::utf8(event.message);
             diagnostics.setError(detail);
             if (event.settingsOperation)
                 overview.setSettingsError(visible);

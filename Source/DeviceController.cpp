@@ -1,8 +1,8 @@
 #include "DeviceController.h"
 
 #include "BleTransport.h"
-#include "ControlConfiguration.h"
 #include "SettingsProtocol.h"
+#include "SettingsWriter.h"
 #include "VendorProtocol.h"
 
 #include <algorithm>
@@ -294,137 +294,42 @@ std::vector<Bytes> DeviceController::exchange(TransportKind transport,
 
 void DeviceController::executeWrite(TransportKind transport, const std::vector<SettingsSpan>& spans)
 {
-    if (spans.empty())
-        throw std::runtime_error("There are no changed records to write");
-
-    for (const auto& span : spans)
-    {
-        const auto size = span.data.size();
-        const auto validSize = size == layout::knobSize || size == layout::sliderSize || size == layout::buttonSize;
-        if (!validSize || static_cast<std::uint64_t>(span.address) + size > layout::snapshotSize)
-            throw std::runtime_error("A changed record has an invalid address or length");
-    }
-
-    const auto steps = spans.size() * 2 + 1;
-    std::size_t step = 0;
-    const auto report = [&](std::size_t completed) {
+    const auto exchangeStep = [&](const SettingsWriter::Request& request) {
+        if (request.step == SettingsWriter::Step::readBack)
+        {
+            const auto address = request.address;
+            const auto length = request.length;
+            return exchange(transport, request.payload, std::chrono::milliseconds { 1500 }, 12.0,
+                            [address, length](const std::vector<Bytes>& replies) {
+                                return chunkReady(replies, address, length);
+                            });
+        }
+        // The save waits longer: the mixer answers it only after programming flash, about 60 ms.
+        const auto window = request.step == SettingsWriter::Step::save ? std::chrono::milliseconds { 3000 }
+                                                                      : std::chrono::milliseconds { 1000 };
+        return exchange(transport, request.payload, window, 12.0, acknowledgementReady);
+    };
+    const auto report = [&](double progress) {
         DeviceEvent progressEvent;
         progressEvent.kind = DeviceEvent::Kind::settingsProgress;
         progressEvent.transport = transport;
         progressEvent.settingsOperation = true;
         progressEvent.writeOperation = true;
-        progressEvent.progress = static_cast<double>(completed) / static_cast<double>(steps);
+        progressEvent.progress = progress;
         emit(std::move(progressEvent));
     };
 
-    std::vector<SettingsSpan> verified;
-    verified.reserve(spans.size());
-    for (const auto& span : spans)
-    {
-        if (threadShouldExit() || stop.load())
-            return;
-        report(step);
-
-        bool acknowledged = false;
-        std::string lastError = "No write acknowledgement was received";
-        for (int attempt = 0; attempt < 2 && !acknowledged; ++attempt)
-        {
-            if (threadShouldExit() || stop.load())
-                return;
-            try
-            {
-                const auto messages = exchange(transport,
-                                                SettingsProtocol::writePayload(span.address, span.data),
-                                                std::chrono::milliseconds { 1000 },
-                                                12.0,
-                                                acknowledgementReady);
-                SettingsProtocol::parseWriteAcknowledgement(messages);
-                acknowledged = true;
-            }
-            catch (const std::exception& error)
-            {
-                lastError = error.what();
-                if (lastError.find("rejected the write") != std::string::npos)
-                    throw;
-            }
-        }
-        if (!acknowledged)
-            throw std::runtime_error(lastError);
-        ++step;
-
-        report(step);
-        Bytes readBack;
-        std::string readError = "No read-back data was received";
-        for (int attempt = 0; attempt < 2 && readBack.empty(); ++attempt)
-        {
-            if (threadShouldExit() || stop.load())
-                return;
-            try
-            {
-                const auto messages = exchange(transport,
-                                                SettingsProtocol::readPayload(5, span.address,
-                                                                              static_cast<std::uint32_t>(span.data.size())),
-                                                std::chrono::milliseconds { 1500 },
-                                                12.0,
-                                                [&](const std::vector<Bytes>& replies) {
-                                                    return chunkReady(replies,
-                                                                      span.address,
-                                                                      static_cast<std::uint32_t>(span.data.size()));
-                                                });
-                readBack = SettingsProtocol::parseChunk(messages, span.address,
-                                                         static_cast<std::uint32_t>(span.data.size()));
-            }
-            catch (const std::exception& error)
-            {
-                readError = error.what();
-            }
-        }
-        if (readBack != span.data)
-            throw std::runtime_error(readBack.empty()
-                                         ? readError
-                                         : "Read-back does not match the bytes that were sent");
-        verified.push_back(span);
-        ++step;
-    }
-
-    // Read-back only proves the RAM copy. Without this save the edits are gone after power-off.
-    report(step);
-    bool saved = false;
-    std::string saveError = "No save acknowledgement was received";
-    for (int attempt = 0; attempt < 2 && !saved; ++attempt)
-    {
-        if (threadShouldExit() || stop.load())
-            return;
-        try
-        {
-            const auto messages = exchange(transport,
-                                            SettingsProtocol::savePayload(),
-                                            std::chrono::milliseconds { 3000 },
-                                            12.0,
-                                            acknowledgementReady);
-            SettingsProtocol::parseWriteAcknowledgement(messages);
-            saved = true;
-        }
-        catch (const std::exception& error)
-        {
-            saveError = error.what();
-            if (saveError.find("rejected the write") != std::string::npos)
-                throw std::runtime_error("The mixer took the edits but refused to save them to flash");
-        }
-    }
-    if (!saved)
-        throw std::runtime_error("The edits reached the mixer but were not saved to flash: " + saveError);
-
-    if (threadShouldExit() || stop.load())
+    auto written = SettingsWriter::write(spans, exchangeStep, report,
+                                         [this] { return threadShouldExit() || stop.load(); });
+    if (!written)
         return;
 
-    report(steps);
     DeviceEvent event;
     event.kind = DeviceEvent::Kind::settingsWritten;
     event.transport = transport;
     event.settingsOperation = true;
     event.writeOperation = true;
-    event.written = std::move(verified);
+    event.written = std::move(*written);
     emit(std::move(event));
 }
 

@@ -61,6 +61,8 @@ target_sources(SMCMixerGUI PRIVATE
     Source/VendorProtocol.cpp
     Source/SettingsProtocol.h
     Source/SettingsProtocol.cpp
+    Source/SettingsWriter.h
+    Source/SettingsWriter.cpp
     Source/CoreMidiTransport.h
     Source/CoreMidiTransport.cpp
     Source/BleTransport.h
@@ -117,6 +119,7 @@ add_executable(SMCMixerCoreTests
     tests/core_tests.cpp
     Source/VendorProtocol.cpp
     Source/SettingsProtocol.cpp
+    Source/SettingsWriter.cpp
     Source/ControlConfiguration.cpp
     Source/SettingsDocument.cpp
 )
