@@ -78,6 +78,7 @@ private:
     bool editingEnabled = true;
     bool suppressEditorCallbacks = false;
     bool suppressChoiceCallbacks = false;
+    bool ccIsController = true;
     double loadProgress = 0.0;
     double writeProgress = 0.0;
 };

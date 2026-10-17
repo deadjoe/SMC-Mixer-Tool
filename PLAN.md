@@ -33,7 +33,45 @@ CC / User 和 DAW 各改各的半张图。写入不会让机器切换现场模�
 - DAW 推子：type 2，channel 按轨道 0–7，CC 40–47
 - DAW 按钮：mode 5，报文为 6 字节 `F0 7F 7F 06 nn F7`
 
-CC / User 里 Min 不能超过 Max。DAW 旋钮那两个字节不要套这条限制。认不出的 type、speed、mode 继续显示原数字。
+CC / User 里 Min 不能超过 Max，CW 旋钮除外。DAW 旋钮那两个字节也不要套这条限制。认不出的 type、speed、mode 继续显示原数字。
+
+## 类型和模式发出的 MIDI
+
+名称和顺序与 Midi Suite 1.15.0 的下拉框一致。下面是在 Master 口上实测到的消息。测试时只把类型写进 RAM，没有发保存，测完写回原值。Value 1 和 Value 2 用的是 17 和 34，这样才分得清是字段里的值还是固定的 0 和 127。
+
+旋钮：
+
+| 值 | 名称 | 发出的消息 |
+| --- | --- | --- |
+| 0 | CC | `Bn cc vv`，转动时在 Min 和 Max 之间累加 |
+| 1 | Aftertouch | `Dn vv` 通道触后，不用 CC |
+| 2 | Note | 通道 1 上 Note On 104 加通道号，力度 127，停下后力度 0；数值走本通道的 Pitch Bend `En 00 vv`。和 Mackie 推子的触摸加推子一样，不用 CC |
+| 3 | CW | 每格一条 `Bn cc vv`，顺时针发 Max，逆时针发 Min。DAW 配置里的 1 和 65 就是 Mackie V-Pot 的 +1 和 -1 |
+
+CW 的 Min 和 Max 是两个要发的值，不是范围，所以不套 Min 不能超过 Max 的限制。
+
+推子：
+
+| 值 | 名称 | 发出的消息 |
+| --- | --- | --- |
+| 0 | CC | `Bn cc vv` |
+| 1 | Aftertouch | `Dn vv` 通道触后，不用 CC |
+| 2 | DAW | `En 00 vv` Pitch Bend，低字节总是 0，不用 CC |
+
+按钮：
+
+| 值 | 名称 | 发出的消息 |
+| --- | --- | --- |
+| 0 | CC Single | 每次按下发一条 `Bn cc v1`，松开不发 |
+| 1 | CC Toggle | 按下轮流发 `Bn cc v2` 和 `Bn cc v1` |
+| 2 | CC Push | 按下发 `Bn cc v2`，松开发 `Bn cc v1` |
+| 3 | Program | 按下依次发 `Bn 00 cc`、`Bn 20 v1`、`Cn v2`，即 Bank MSB、Bank LSB、Program |
+| 4 | Custom | 按下原样发存着的报文，比如 `F0 7F 7F 06 08 F7` |
+| 5 | Note | 按下发 `9n cc 7F`，松开发 `9n cc 00`，不用 Value 1 和 Value 2 |
+
+检查板按这些含义给字段起名，用不到的字段标成 NOT USED，仍然可以改。
+
+还没测过的：旋钮 Speed 的含义，Note 和 Aftertouch 旋钮的 Min 和 Max 是否限制范围，DAW 模式下这些类型是否一样。DAW 模式这次没切过去，按住 Shift 再按 Left 或 Right 时，设备只发了 Left 和 Right 的 CC。
 
 ## 模块
 

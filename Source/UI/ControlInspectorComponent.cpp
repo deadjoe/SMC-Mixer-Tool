@@ -29,6 +29,122 @@ juce::String ccCaption(std::uint8_t value)
     return juce::String::fromUTF8("CC  \xc2\xb7  ") + juce::String(controlChangeName(value)).toUpperCase();
 }
 
+// What each number field means for a type or mode, as measured on the mixer's Master port.
+struct FieldMeaning
+{
+    bool ccIsController = true;
+    juce::String ccName = "CC";
+    juce::String minimumName = "MIN";
+    juce::String maximumName = "MAX";
+    juce::String value1Name = "VALUE 1";
+    juce::String value2Name = "VALUE 2";
+    juce::String note;
+};
+
+const juce::String notUsed = juce::String::fromUTF8("CC  \xc2\xb7  NOT USED");
+
+FieldMeaning knobMeaning(std::uint8_t type)
+{
+    FieldMeaning meaning;
+    switch (type)
+    {
+        case 0:
+            meaning.note = "Sends the CC with a value that moves between Min and Max.";
+            break;
+        case 1:
+            meaning.ccIsController = false;
+            meaning.ccName = notUsed;
+            meaning.note = "Sends Channel Pressure between Min and Max. No CC number is sent.";
+            break;
+        case 2:
+            meaning.ccIsController = false;
+            meaning.ccName = notUsed;
+            meaning.note = "Like a Mackie fader: Note On 104 plus the channel number on channel 1 while turning, "
+                           "and Pitch Bend on this channel. No CC number is sent.";
+            break;
+        case 3:
+            meaning.minimumName = "CCW VALUE";
+            meaning.maximumName = "CW VALUE";
+            meaning.note = "Relative: each step sends the CC with the CW value or the CCW value. Mackie uses 1 and 65.";
+            break;
+        default:
+            break;
+    }
+    return meaning;
+}
+
+FieldMeaning sliderMeaning(std::uint8_t type)
+{
+    FieldMeaning meaning;
+    switch (type)
+    {
+        case 0:
+            meaning.note = "Sends the CC with a value between Min and Max.";
+            break;
+        case 1:
+            meaning.ccIsController = false;
+            meaning.ccName = notUsed;
+            meaning.note = "Sends Channel Pressure between Min and Max. No CC number is sent.";
+            break;
+        case 2:
+            meaning.ccIsController = false;
+            meaning.ccName = notUsed;
+            meaning.note = "Sends Pitch Bend on the channel, as a Mackie fader does. No CC number is sent.";
+            break;
+        default:
+            break;
+    }
+    return meaning;
+}
+
+FieldMeaning buttonMeaning(std::uint8_t mode)
+{
+    const auto dot = juce::String::fromUTF8("  \xc2\xb7  ");
+    FieldMeaning meaning;
+    switch (mode)
+    {
+        case 0:
+            meaning.value1Name = "VALUE 1" + dot + "PRESS";
+            meaning.value2Name = "VALUE 2" + dot + "NOT USED";
+            meaning.note = "Sends Value 1 once on each press. Nothing is sent on release.";
+            break;
+        case 1:
+            meaning.value1Name = "VALUE 1" + dot + "OFF";
+            meaning.value2Name = "VALUE 2" + dot + "ON";
+            meaning.note = "Each press alternates between Value 2 and Value 1.";
+            break;
+        case 2:
+            meaning.value1Name = "VALUE 1" + dot + "RELEASE";
+            meaning.value2Name = "VALUE 2" + dot + "PRESS";
+            meaning.note = "Sends Value 2 on press and Value 1 on release.";
+            break;
+        case 3:
+            meaning.ccIsController = false;
+            meaning.ccName = "BANK MSB";
+            meaning.value1Name = "BANK LSB";
+            meaning.value2Name = "PROGRAM";
+            meaning.note = "Each press sends Bank Select MSB, Bank Select LSB, then Program Change.";
+            break;
+        case 4:
+            meaning.ccIsController = false;
+            meaning.ccName = notUsed;
+            meaning.value1Name = "VALUE 1" + dot + "NOT USED";
+            meaning.value2Name = "VALUE 2" + dot + "NOT USED";
+            meaning.note = "Each press sends the stored message.";
+            break;
+        case 5:
+            meaning.ccIsController = false;
+            meaning.ccName = "NOTE";
+            meaning.value1Name = "VALUE 1" + dot + "NOT USED";
+            meaning.value2Name = "VALUE 2" + dot + "NOT USED";
+            meaning.note = "Sends Note On at velocity 127 on press and at velocity 0 on release.";
+            break;
+        default:
+            break;
+    }
+    return meaning;
+}
+
 bool wholeNumber(const juce::String& text, int minimum, int maximum, int& parsed)
 {
     const auto trimmed = text.trim();
@@ -146,6 +262,11 @@ ControlInspectorComponent::ControlInspectorComponent()
         if (selectedId <= 0)
             return;
         onControlEdited(selected, activeProfile, *choiceField, static_cast<std::uint8_t>(selectedId - 1));
+        // A new type or mode changes what the other fields mean. Relabel once the combo box has settled.
+        juce::MessageManager::callAsync([safe = juce::Component::SafePointer<ControlInspectorComponent>(this)] {
+            if (safe != nullptr)
+                safe->refreshFields();
+        });
     };
     addAndMakeVisible(choiceBox);
 
@@ -423,7 +544,7 @@ void ControlInspectorComponent::handleEditor(int index)
     if (!field)
         return;
     const auto value = static_cast<std::uint8_t>(juce::roundToInt(editors[static_cast<std::size_t>(index)].getValue()));
-    if (*field == EditableField::cc)
+    if (*field == EditableField::cc && ccIsController)
         fieldNames[static_cast<std::size_t>(index)].setText(ccCaption(value), juce::dontSendNotification);
     onControlEdited(selected, activeProfile, *field, value);
 }
@@ -510,6 +631,25 @@ void ControlInspectorComponent::updateStatus()
     {
         text = "Stored CC / User profile. Edits stay here until you write them.";
     }
+    if (activeProfile == DeviceProfile::ccUser && hasSelection)
+    {
+        const auto& profile = configuration->profile(DeviceProfile::ccUser);
+        if (selected.kind == ControlKind::knob)
+            text = knobMeaning(profile.knobs[static_cast<std::size_t>(selected.index)].type).note + " " + text;
+        else if (selected.kind == ControlKind::slider)
+            text = sliderMeaning(profile.sliders[static_cast<std::size_t>(selected.index)].type).note + " " + text;
+        else
+        {
+            const auto buttonIndex = selected.kind == ControlKind::trackButton ? selected.index : selected.index + 32;
+            const auto& button = profile.buttons[static_cast<std::size_t>(buttonIndex)];
+            auto note = buttonMeaning(button.mode).note;
+            if (button.mode == 4)
+                note = button.dawMessage.empty() ? juce::String("Custom has no stored message.")
+                                                 : "Each press sends " + hexBytes(button.dawMessage) + ".";
+            text = note + " " + text;
+        }
+        statusLabel.setTooltip(text);
+    }
     show(text, mixerui::muted);
 }
 
@@ -535,6 +675,13 @@ void ControlInspectorComponent::refreshFields()
         : selected.kind == ControlKind::trackButton ? mixerui::trackButton
                                                     : mixerui::globalButton;
 
+    // The CC field shows its MIDI name only when the byte is sent as a controller number.
+    const auto ccName = [&](const FieldMeaning& meaning, std::uint8_t cc) {
+        return meaning.ccIsController && showEditors ? ccCaption(cc) : meaning.ccName;
+    };
+    const auto ccValue = [](const FieldMeaning& meaning, std::uint8_t cc) {
+        return meaning.ccIsController ? ccText(cc) : number(cc);
+    };
     const auto showValue = [&](int index, const juce::String& name, const juce::String& value,
                                std::optional<EditableField> field, std::uint8_t raw, int maximum, bool asChannel) {
         if (showEditors && field)
@@ -552,28 +699,32 @@ void ControlInspectorComponent::refreshFields()
         case ControlKind::knob:
         {
             const auto& knob = profile.knobs[static_cast<std::size_t>(selected.index)];
+            const auto meaning = knobMeaning(knob.type);
+            ccIsController = meaning.ccIsController;
             if (showEditors)
                 setChoice(0, "TYPE", EditableField::type, knob.type, knobTypes, "CC, Aftertouch, Note, or CW.");
             else
                 setField(0, "TYPE", namedValue(knobTypeName(knob.type), knob.type));
             setField(1, "SPEED", knob.speed == 2 ? juce::String("Normal") : number(knob.speed));
             showValue(2, "CHANNEL", channel(knob.channel), EditableField::channel, knob.channel, 15, true);
-            showValue(3, showEditors ? ccCaption(knob.cc) : "CC", ccText(knob.cc), EditableField::cc, knob.cc, 127, false);
-            showValue(4, "MIN", number(knob.minimum), EditableField::minimum, knob.minimum, 127, false);
-            showValue(5, "MAX", number(knob.maximum), EditableField::maximum, knob.maximum, 127, false);
+            showValue(3, ccName(meaning, knob.cc), ccValue(meaning, knob.cc), EditableField::cc, knob.cc, 127, false);
+            showValue(4, meaning.minimumName, number(knob.minimum), EditableField::minimum, knob.minimum, 127, false);
+            showValue(5, meaning.maximumName, number(knob.maximum), EditableField::maximum, knob.maximum, 127, false);
             break;
         }
         case ControlKind::slider:
         {
             const auto& slider = profile.sliders[static_cast<std::size_t>(selected.index)];
+            const auto meaning = sliderMeaning(slider.type);
+            ccIsController = meaning.ccIsController;
             if (showEditors)
                 setChoice(0, "TYPE", EditableField::type, slider.type, sliderTypes, "CC, Aftertouch, or DAW.");
             else
                 setField(0, "TYPE", namedValue(sliderTypeName(slider.type), slider.type));
             showValue(1, "CHANNEL", channel(slider.channel), EditableField::channel, slider.channel, 15, true);
-            showValue(2, showEditors ? ccCaption(slider.cc) : "CC", ccText(slider.cc), EditableField::cc, slider.cc, 127, false);
-            showValue(3, "MIN", number(slider.minimum), EditableField::minimum, slider.minimum, 127, false);
-            showValue(4, "MAX", number(slider.maximum), EditableField::maximum, slider.maximum, 127, false);
+            showValue(2, ccName(meaning, slider.cc), ccValue(meaning, slider.cc), EditableField::cc, slider.cc, 127, false);
+            showValue(3, meaning.minimumName, number(slider.minimum), EditableField::minimum, slider.minimum, 127, false);
+            showValue(4, meaning.maximumName, number(slider.maximum), EditableField::maximum, slider.maximum, 127, false);
             break;
         }
         case ControlKind::trackButton:
@@ -581,15 +732,17 @@ void ControlInspectorComponent::refreshFields()
         {
             const auto buttonIndex = selected.kind == ControlKind::trackButton ? selected.index : selected.index + 32;
             const auto& button = profile.buttons[static_cast<std::size_t>(buttonIndex)];
+            const auto meaning = buttonMeaning(button.mode);
+            ccIsController = meaning.ccIsController;
             if (showEditors)
                 setChoice(0, "MODE", EditableField::mode, button.mode, buttonModes,
                           "CC Single, CC Toggle, CC Push, Program, Custom, or Note. Value 1 and Value 2 stay on this button.");
             else
                 setField(0, "MODE", namedValue(buttonModeName(button.mode), button.mode));
             showValue(1, "CHANNEL", channel(button.channel), EditableField::channel, button.channel, 15, true);
-            showValue(2, showEditors ? ccCaption(button.cc) : "CC", ccText(button.cc), EditableField::cc, button.cc, 127, false);
-            showValue(3, "VALUE 1", number(button.value1), EditableField::value1, button.value1, 127, false);
-            showValue(4, "VALUE 2", number(button.value2), EditableField::value2, button.value2, 127, false);
+            showValue(2, ccName(meaning, button.cc), ccValue(meaning, button.cc), EditableField::cc, button.cc, 127, false);
+            showValue(3, meaning.value1Name, number(button.value1), EditableField::value1, button.value1, 127, false);
+            showValue(4, meaning.value2Name, number(button.value2), EditableField::value2, button.value2, 127, false);
             showValue(5, "LED", number(button.led), EditableField::led, button.led, 255, false);
             break;
         }

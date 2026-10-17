@@ -179,7 +179,15 @@ int main()
     expect(error == "Min cannot exceed Max.", "min message");
     expect(document.apply({ ControlKind::knob, 0 }, DeviceProfile::ccUser, EditableField::minimum, 127, error), "min may equal max");
     expect(!document.apply({ ControlKind::knob, 8 }, DeviceProfile::ccUser, EditableField::cc, 1, error), "index rejected");
+
     expect(error == "This field cannot be edited.", "index message");
+    SettingsDocument relative;
+    relative.load(image);
+    expect(relative.apply({ ControlKind::knob, 0 }, DeviceProfile::ccUser, EditableField::type, knobTypeCw, error), "cw type");
+    expect(relative.apply({ ControlKind::knob, 0 }, DeviceProfile::ccUser, EditableField::minimum, 65, error), "cw ccw value");
+    expect(relative.apply({ ControlKind::knob, 0 }, DeviceProfile::ccUser, EditableField::maximum, 1, error), "cw value below ccw");
+    expect(relative.apply({ ControlKind::knob, 0 }, DeviceProfile::ccUser, EditableField::type, 0, error), "back to cc");
+    expect(!relative.apply({ ControlKind::knob, 0 }, DeviceProfile::ccUser, EditableField::minimum, 66, error), "cc range checked again");
 
     const auto knobOffset = layout::profileSize + layout::knobsOffset;
     SettingsSpan matching;

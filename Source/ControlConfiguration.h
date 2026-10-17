@@ -104,6 +104,9 @@ struct ControlConfiguration
     std::string toJson(DeviceProfile profile) const;
 };
 
+// Knob type 3 is relative: Min and Max are the values sent per counter-clockwise and clockwise step.
+constexpr std::uint8_t knobTypeCw = 3;
+
 const char* knobTypeName(std::uint8_t type);
 const char* sliderTypeName(std::uint8_t type);
 const char* buttonModeName(std::uint8_t mode);
