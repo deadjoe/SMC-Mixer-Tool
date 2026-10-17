@@ -100,7 +100,7 @@ DeviceSnapshot bluetoothSnapshot()
     return snapshot;
 }
 
-void connect(MainComponent& main, const DeviceSnapshot& snapshot = usbSnapshot())
+void connect(MainComponent& main, const DeviceSnapshot& snapshot = usbSnapshot(), const Bytes& image = demoImage())
 {
     DeviceEvent identity;
     identity.kind = DeviceEvent::Kind::snapshotReady;
@@ -112,7 +112,7 @@ void connect(MainComponent& main, const DeviceSnapshot& snapshot = usbSnapshot()
     settings.kind = DeviceEvent::Kind::settingsReady;
     settings.transport = snapshot.transport;
     settings.settingsOperation = true;
-    settings.settings.data = demoImage();
+    settings.settings.data = image;
     settings.settings.chunkCount = 7;
     settings.settings.transport = snapshot.transport;
     main.deliver(settings);
@@ -390,6 +390,31 @@ void testProfilesAndPanel()
     expect(main->overview().inspector().numberFieldFor(EditableField::channel)->getMaximum() == 15, "channel range");
 }
 
+void testLongNote()
+{
+    // A Custom key with the longest stored message: 64 bytes, 191 characters of hex.
+    auto image = demoImage();
+    auto* record = image.data() + layout::profileSize;
+    record[0] = buttonModeCustom;
+    record[5] = static_cast<std::uint8_t>(layout::buttonMessageCapacity);
+    for (std::size_t index = 0; index < layout::buttonMessageCapacity; ++index)
+        record[6 + index] = static_cast<std::uint8_t>(index == 0 ? 0xf0 : index + 1 == layout::buttonMessageCapacity ? 0xf7 : 0x7f);
+
+    auto main = makeMain(MainComponent::minimumWidth, MainComponent::minimumHeight);
+    connect(*main, usbSnapshot(), image);
+    main->selectControl({ ControlKind::trackButton, 0 });
+    auto& note = main->overview().inspector().noteLabel();
+    expect(note.getText().startsWith("Each press sends F0 7F") && note.getText().endsWith("7F F7."), "custom message note");
+    expect(note.getTooltip() == note.getText(), "the note's tooltip holds the whole sentence");
+
+    const auto lineHeight = note.getFont().getHeight();
+    const auto width = static_cast<float>(note.getWidth() - note.getBorderSize().getLeftAndRight());
+    const auto textWidth = juce::GlyphArrangement::getStringWidth(note.getFont(), note.getText());
+    expect(static_cast<float>(note.getHeight()) >= lineHeight * 2.0f, "the note has room for two lines");
+    expect(textWidth <= width * 2.0f * 0.92f, "the longest note fits in two lines at the smallest window: "
+                                                + std::to_string(textWidth) + " in 2 x " + std::to_string(width));
+}
+
 void testContrast()
 {
     const auto ratio = [](juce::Colour a, juce::Colour b) {
@@ -475,6 +500,7 @@ int main(int argc, char* argv[])
     testQuit();
     testWriteButton();
     testProfilesAndPanel();
+    testLongNote();
     testContrast();
 
     for (int index = 1; index + 1 < argc; ++index)

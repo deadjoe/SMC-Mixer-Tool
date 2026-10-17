@@ -47,7 +47,7 @@ public:
     };
 
     static constexpr int minimumWidth = 1100;
-    static constexpr int minimumHeight = 720;
+    static constexpr int minimumHeight = 740;
 
     bool hasUnsavedEdits() const;
     // Asks first when edits would be lost or a write would be cut short, then calls quit.

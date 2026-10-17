@@ -38,7 +38,7 @@ public:
     void paint(juce::Graphics& graphics) override;
     void resized() override;
 
-    static constexpr int preferredHeight = 190;
+    static constexpr int preferredHeight = 206;
     static constexpr int slotCount = 6;
 
     // For tests: the field editing a value, or nullptr when that field is not shown.
@@ -46,6 +46,7 @@ public:
     juce::ComboBox& choiceBox() noexcept { return choice; }
     juce::TextButton& revertButton() noexcept { return revert; }
     juce::String noteText() const { return note.getText(); }
+    juce::Label& noteLabel() noexcept { return note; }
 
 private:
     struct Slot
