@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.22)
 
 set(CMAKE_OSX_DEPLOYMENT_TARGET "12.0" CACHE STRING "Minimum macOS version" FORCE)
-project(SMCMixerToolGUI VERSION 1.0.3 LANGUAGES C CXX OBJCXX)
+project(SMCMixerToolGUI VERSION 1.1.0 LANGUAGES C CXX OBJCXX)
 
 # JUCE puts each artefact in a folder named for the configuration. Without a build type a
 # single-configuration generator leaves that folder out, so default to Debug.
