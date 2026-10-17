@@ -1,5 +1,8 @@
 #include "ControlConfiguration.h"
 
+#include "VendorProtocol.h"
+
+#include <algorithm>
 #include <iterator>
 #include <stdexcept>
 
@@ -20,6 +23,46 @@ std::string nameAt(Names& names, std::size_t count, int index)
 {
     return index >= 0 && static_cast<std::size_t>(index) < count ? names[index] : "Unknown";
 }
+
+std::size_t countOf(ControlKind kind)
+{
+    switch (kind)
+    {
+        case ControlKind::knob: return layout::knobCount;
+        case ControlKind::slider: return layout::sliderCount;
+        case ControlKind::trackButton: return layout::trackButtonCount;
+        case ControlKind::globalButton: return layout::globalButtonCount;
+    }
+    return 0;
+}
+}
+
+bool isButton(ControlKind kind)
+{
+    return kind == ControlKind::trackButton || kind == ControlKind::globalButton;
+}
+
+bool isValidControl(ControlSelection selection)
+{
+    return selection.index >= 0 && static_cast<std::size_t>(selection.index) < countOf(selection.kind);
+}
+
+std::size_t buttonRecordIndex(ControlSelection selection)
+{
+    const auto index = static_cast<std::size_t>(selection.index);
+    return selection.kind == ControlKind::globalButton ? layout::trackButtonCount + index : index;
+}
+
+const std::vector<ControlSelection>& allControls()
+{
+    static const auto controls = [] {
+        std::vector<ControlSelection> list;
+        for (const auto kind : { ControlKind::knob, ControlKind::slider, ControlKind::trackButton, ControlKind::globalButton })
+            for (std::size_t index = 0; index < countOf(kind); ++index)
+                list.push_back({ kind, static_cast<int>(index) });
+        return list;
+    }();
+    return controls;
 }
 
 const char* knobTypeName(std::uint8_t type)
@@ -103,10 +146,11 @@ const char* controlChangeName(std::uint8_t cc)
 ControlConfiguration ControlConfiguration::parse(const Bytes& data)
 {
     if (data.size() != layout::snapshotSize)
-        throw std::runtime_error("Control configuration must contain exactly 6282 bytes");
+        throw std::runtime_error("Control configuration must contain exactly "
+                                 + std::to_string(layout::snapshotSize) + " bytes");
 
     ControlConfiguration result;
-    for (std::size_t profileIndex = 0; profileIndex < 2; ++profileIndex)
+    for (std::size_t profileIndex = 0; profileIndex < layout::profileCount; ++profileIndex)
     {
         const auto profileBase = profileIndex * layout::profileSize;
         auto& profile = result.profiles[profileIndex];
@@ -121,11 +165,11 @@ ControlConfiguration ControlConfiguration::parse(const Bytes& data)
             button.value1 = data[offset + 3];
             button.value2 = data[offset + 4];
             const auto dawLength = data[offset + 5];
-            if (dawLength > 64)
+            if (dawLength > layout::buttonMessageCapacity)
                 throw std::runtime_error("Invalid DAW message length in button record");
             button.dawMessage = Bytes(data.begin() + static_cast<std::ptrdiff_t>(offset + 6),
                                       data.begin() + static_cast<std::ptrdiff_t>(offset + 6 + dawLength));
-            button.led = data[offset + 70];
+            button.led = data[offset + layout::buttonSize - 1];
         }
 
         const auto knobBase = profileBase + layout::knobsOffset;
@@ -161,6 +205,115 @@ const ControlProfile& ControlConfiguration::profile(DeviceProfile selectedProfil
     return profiles[static_cast<std::size_t>(selectedProfile)];
 }
 
+bool hasField(ControlKind kind, EditableField field)
+{
+    switch (field)
+    {
+        case EditableField::type:
+            return kind == ControlKind::knob || kind == ControlKind::slider;
+        case EditableField::minimum:
+        case EditableField::maximum:
+            return kind == ControlKind::knob || kind == ControlKind::slider;
+        case EditableField::mode:
+        case EditableField::value1:
+        case EditableField::value2:
+        case EditableField::led:
+            return isButton(kind);
+        case EditableField::channel:
+        case EditableField::cc:
+            return true;
+    }
+    return false;
+}
+
+FieldRange fieldLimits(ControlKind kind, EditableField field)
+{
+    switch (field)
+    {
+        case EditableField::type:
+            return { 0, (kind == ControlKind::knob ? knobTypeCount : sliderTypeCount) - 1 };
+        case EditableField::mode: return { 0, buttonModeCount - 1 };
+        case EditableField::channel: return { 0, 15 };
+        case EditableField::led: return { 0, 255 };
+        case EditableField::cc:
+        case EditableField::minimum:
+        case EditableField::maximum:
+        case EditableField::value1:
+        case EditableField::value2: return { 0, 127 }; // MIDI data bytes have seven bits
+    }
+    return {};
+}
+
+std::uint8_t fieldValue(const ControlProfile& profile, ControlSelection selection, EditableField field)
+{
+    if (!isValidControl(selection) || !hasField(selection.kind, field))
+        return 0;
+    const auto index = static_cast<std::size_t>(selection.index);
+    // hasField() above has ruled out the fields a kind does not store.
+    switch (selection.kind)
+    {
+        case ControlKind::knob:
+        {
+            const auto& knob = profile.knobs[index];
+            return field == EditableField::type ? knob.type
+                 : field == EditableField::channel ? knob.channel
+                 : field == EditableField::cc ? knob.cc
+                 : field == EditableField::minimum ? knob.minimum
+                                                   : knob.maximum;
+        }
+        case ControlKind::slider:
+        {
+            const auto& slider = profile.sliders[index];
+            return field == EditableField::type ? slider.type
+                 : field == EditableField::channel ? slider.channel
+                 : field == EditableField::cc ? slider.cc
+                 : field == EditableField::minimum ? slider.minimum
+                                                   : slider.maximum;
+        }
+        case ControlKind::trackButton:
+        case ControlKind::globalButton:
+        {
+            const auto& button = profile.button(selection);
+            return field == EditableField::mode ? button.mode
+                 : field == EditableField::channel ? button.channel
+                 : field == EditableField::cc ? button.cc
+                 : field == EditableField::value1 ? button.value1
+                 : field == EditableField::value2 ? button.value2
+                                                  : button.led;
+        }
+    }
+    return 0;
+}
+
+bool isRelativeKnob(const ControlProfile& profile, ControlSelection selection)
+{
+    return selection.kind == ControlKind::knob && isValidControl(selection)
+        && profile.knobs[static_cast<std::size_t>(selection.index)].type == knobTypeRelative;
+}
+
+FieldRange allowedRange(const ControlProfile& profile, ControlSelection selection, EditableField field)
+{
+    auto range = fieldLimits(selection.kind, field);
+    const auto bounded = field == EditableField::minimum || field == EditableField::maximum;
+    if (!bounded || !hasField(selection.kind, field) || isRelativeKnob(profile, selection))
+        return range;
+
+    // A stored pair may already be inverted. The bound then moves to the current value, so the
+    // field can only move back toward a valid range.
+    const int current = fieldValue(profile, selection, field);
+    if (field == EditableField::minimum)
+    {
+        const int maximum = fieldValue(profile, selection, EditableField::maximum);
+        range.maximum = std::min(range.maximum, std::max(maximum, current));
+    }
+    else
+    {
+        const int minimum = fieldValue(profile, selection, EditableField::minimum);
+        range.minimum = std::max(range.minimum, std::min(minimum, current));
+    }
+    return range;
+}
+
 namespace
 {
 void appendJsonString(std::string& json, const std::string& value)
@@ -194,20 +347,6 @@ void appendJsonString(std::string& json, const std::string& value)
     json.push_back('"');
 }
 
-std::string hexMessage(const Bytes& bytes)
-{
-    std::string text;
-    for (const auto byte : bytes)
-    {
-        if (!text.empty())
-            text.push_back(' ');
-        constexpr char digits[] = "0123456789ABCDEF";
-        text.push_back(digits[byte >> 4]);
-        text.push_back(digits[byte & 0x0f]);
-    }
-    return text;
-}
-
 void appendKnob(std::string& json, const char* name, int index, const KnobConfiguration& knob)
 {
     json += "    {\n";
@@ -239,7 +378,7 @@ void appendButton(std::string& json, int track, const char* name, const ButtonCo
     json += "      \"value2\": " + std::to_string(button.value2) + ",\n";
     json += "      \"led\": " + std::to_string(button.led) + ",\n";
     json += "      \"message\": ";
-    appendJsonString(json, hexMessage(button.dawMessage));
+    appendJsonString(json, VendorProtocol::hexString(button.dawMessage));
     json += "\n    }";
 }
 }
@@ -248,7 +387,7 @@ std::string ControlConfiguration::toJson(DeviceProfile selectedProfile) const
 {
     const auto& source = profile(selectedProfile);
     std::string json = "{\n  \"profile\": ";
-    appendJsonString(json, selectedProfile == DeviceProfile::ccUser ? "CC / User" : "DAW");
+    appendJsonString(json, profileName(selectedProfile));
     json += ",\n  \"knobs\": [\n";
     for (std::size_t index = 0; index < source.knobs.size(); ++index)
     {
@@ -273,19 +412,27 @@ std::string ControlConfiguration::toJson(DeviceProfile selectedProfile) const
         json += index + 1 == source.sliders.size() ? "\n" : ",\n";
     }
     json += "  ],\n  \"trackButtons\": [\n";
-    for (int index = 0; index < 32; ++index)
+    constexpr auto trackCount = static_cast<int>(layout::trackButtonCount);
+    for (int index = 0; index < trackCount; ++index)
     {
-        appendButton(json, index / 4 + 1, trackButtonFullName(index % 4).c_str(), source.buttons[static_cast<std::size_t>(index)]);
-        json += index == 31 ? "\n" : ",\n";
+        appendButton(json, index / 4 + 1, trackButtonFullName(index % 4).c_str(),
+                     source.button({ ControlKind::trackButton, index }));
+        json += index + 1 == trackCount ? "\n" : ",\n";
     }
     json += "  ],\n  \"globalButtons\": [\n";
-    for (int index = 0; index < 11; ++index)
+    constexpr auto globalCount = static_cast<int>(layout::globalButtonCount);
+    for (int index = 0; index < globalCount; ++index)
     {
-        appendButton(json, 0, globalButtonFullName(index).c_str(), source.buttons[static_cast<std::size_t>(32 + index)]);
-        json += index == 10 ? "\n" : ",\n";
+        appendButton(json, 0, globalButtonFullName(index).c_str(), source.button({ ControlKind::globalButton, index }));
+        json += index + 1 == globalCount ? "\n" : ",\n";
     }
     json += "  ]\n}\n";
     return json;
+}
+
+std::string profileName(DeviceProfile profile)
+{
+    return profile == DeviceProfile::ccUser ? "CC / User" : "DAW";
 }
 
 std::string controlDisplayName(ControlSelection selection)
@@ -317,10 +464,10 @@ std::string trackButtonFullName(int buttonIndex)
 
 std::string globalButtonShortName(int buttonIndex)
 {
-    return nameAt(globalShortNames, 11, buttonIndex);
+    return nameAt(globalShortNames, layout::globalButtonCount, buttonIndex);
 }
 
 std::string globalButtonFullName(int buttonIndex)
 {
-    return nameAt(globalNames, 11, buttonIndex);
+    return nameAt(globalNames, layout::globalButtonCount, buttonIndex);
 }

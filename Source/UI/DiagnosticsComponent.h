@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../DeviceModel.h"
+#include "MixerLookAndFeel.h"
 
 #include <JuceHeader.h>
 
@@ -14,33 +15,32 @@ public:
     DiagnosticsComponent();
 
     std::function<void()> onReadSettings;
+    std::function<void(const juce::String&, mixerui::Tone)> onNotice;
 
     void setActiveTransport(TransportKind transport);
     void refreshEndpoints();
     void setSnapshot(const DeviceSnapshot& snapshot);
     void clearSnapshot();
-    void setBusy(bool busy, double progress, bool settingsOperation);
+    void setBusy(bool busy);
     void setSettings(const SettingsReadResult& settings);
     void adoptWorkingImage(const Bytes& image);
-    void setError(const juce::String& message);
+    void setLastError(const juce::String& message);
+    void exportSettings();
     void paint(juce::Graphics& graphics) override;
     void resized() override;
 
 private:
-    void exportSettings();
     void updateEnabledState();
     void render();
     juce::String linkReport() const;
 
     juce::TextEditor reportEditor;
-    juce::TextButton readButton { "Read snapshot" };
-    juce::TextButton exportButton { "Export .bin" };
-    juce::Label statusLabel;
-    juce::Label settingsSummary;
-    double progressValue = 0.0;
-    juce::ProgressBar progressBar;
+    juce::Label titleLabel;
+    juce::Label versionLabel;
+    juce::TextButton readButton { "Read settings" };
+    juce::TextButton exportButton { juce::String::fromUTF8("Export image\xe2\x80\xa6") };
     bool controlsBusy = false;
-    bool readingSettings = false;
+    juce::String lastError;
     TransportKind activeTransport = TransportKind::usbC;
     bool settingsFromRead = false;
     std::optional<DeviceSnapshot> snapshot;
@@ -48,5 +48,4 @@ private:
     std::unique_ptr<juce::FileChooser> fileChooser;
 
     juce::Rectangle<int> reportCard;
-    juce::Rectangle<int> settingsCard;
 };

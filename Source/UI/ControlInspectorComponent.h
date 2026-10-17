@@ -1,84 +1,80 @@
 #pragma once
 
-#include "../ControlConfiguration.h"
+#include "../ControlDescription.h"
+#include "MixerLookAndFeel.h"
+#include "Widgets.h"
 
 #include <JuceHeader.h>
 
 #include <array>
 #include <functional>
-#include <memory>
 #include <optional>
-#include <vector>
 
+// The selected control's stored settings. Fields keep their place and update in place, so an
+// edit, or the document's answer to it, never rebuilds the field under the pointer.
 class ControlInspectorComponent final : public juce::Component
 {
 public:
     ControlInspectorComponent();
 
-    std::function<void()> onSettingsRequired;
-    std::function<void(ControlSelection, DeviceProfile, EditableField, std::uint8_t)> onControlEdited;
+    std::function<void(ControlSelection, DeviceProfile, EditableField, std::uint8_t, bool continuing)> onControlEdited;
     std::function<void(ControlSelection, DeviceProfile)> onRevertRequested;
-    std::function<void()> onWriteRequested;
-    std::function<bool(ControlSelection, DeviceProfile)> isRecordDirty;
+    std::function<void()> onReadRequested;
+    std::function<void(const juce::String&, mixerui::Tone)> onNotice;
 
-    void selectControl(ControlSelection selection);
-    void setConfiguration(const ControlConfiguration& configuration);
-    void cacheConfiguration(const ControlConfiguration& configuration);
-    void setDirtyControls(const std::vector<ControlSelection>& dirty);
-    void setEditingEnabled(bool enabled);
-    void clearConfiguration();
-    void setLoading(bool loading, double progress = 0.0);
-    void setWriting(bool writing, double progress = 0.0);
-    void setReadError(const juce::String& message);
+    struct View
+    {
+        const ControlProfile* profile = nullptr; // nullptr until the settings are read
+        DeviceProfile profileKind = DeviceProfile::ccUser;
+        std::optional<ControlSelection> selection;
+        bool editable = false;
+        bool selectionDirty = false;
+        juce::String emptyMessage; // shown while there is no profile
+        bool offerRead = false;    // shows Read settings next to the empty message
+    };
+
+    void show(const View& view);
+
     void paint(juce::Graphics& graphics) override;
     void resized() override;
 
-private:
-    void refreshFields();
-    void updateProfileButtons();
-    void copyProfile();
-    void exportProfile();
-    void showNotice(const juce::String& message, juce::Colour colour);
-    void updateStatus();
-    void updateActionButtons();
-    void setField(int index, const juce::String& name, const juce::String& value, bool visible = true);
-    void setChoice(int index, const juce::String& name, EditableField field, std::uint8_t value,
-                   const std::vector<std::uint8_t>& values, const juce::String& tooltip);
-    void setEditor(int index, const juce::String& name, EditableField field, std::uint8_t value, int maximum, bool asChannel);
-    void hideFields();
-    void handleEditor(int index);
-    bool selectedRecordDirty() const;
-    bool anyDirty() const;
+    static constexpr int preferredHeight = 190;
+    static constexpr int slotCount = 6;
 
+    // For tests: the field editing a value, or nullptr when that field is not shown.
+    NumberField* numberFieldFor(EditableField field);
+    juce::ComboBox& choiceBox() noexcept { return choice; }
+    juce::TextButton& revertButton() noexcept { return revert; }
+    juce::String noteText() const { return note.getText(); }
+
+private:
+    struct Slot
+    {
+        juce::Label caption;
+        juce::Label helper;
+        NumberField number;
+        std::optional<EditableField> field;
+        bool visible = false;
+    };
+
+    void configureChoice(ControlKind kind);
+    void showNumber(int index, EditableField field, const juce::String& caption, const juce::String& helper,
+                    bool used, int displayOffset, bool listed);
+    void showReadOnly(int index, const juce::String& caption, int value, const juce::String& helper);
+    void hideSlot(int index);
+    void edit(EditableField field, int value, bool continuing);
+
+    View current;
+    std::optional<ControlKind> choiceKind;
+    juce::Label kindLabel;
     juce::Label titleLabel;
-    juce::Label selectionLabel;
-    juce::Label statusLabel;
-    juce::TextButton revertButton { "Revert" };
-    juce::TextButton writeButton { "Write" };
-    juce::TextButton exportButton { "Export" };
-    juce::TextButton copyButton { "Copy" };
-    juce::TextButton ccUserButton { "CC / User" };
-    juce::TextButton dawButton { "DAW" };
-    std::unique_ptr<juce::FileChooser> fileChooser;
-    std::array<juce::Label, 6> fieldNames;
-    std::array<juce::Label, 6> fieldValues;
-    std::array<juce::Slider, 6> editors;
-    juce::ComboBox choiceBox;
-    std::array<std::optional<EditableField>, 6> editorFields;
-    std::optional<EditableField> choiceField;
-    int choiceIndex = 0;
-    std::optional<ControlConfiguration> configuration;
-    std::vector<ControlSelection> dirtyControls;
-    ControlSelection selected;
-    DeviceProfile activeProfile = DeviceProfile::ccUser;
-    juce::String readError;
-    bool hasSelection = false;
-    bool loading = false;
-    bool writing = false;
-    bool editingEnabled = true;
-    bool suppressEditorCallbacks = false;
-    bool suppressChoiceCallbacks = false;
-    bool ccIsController = true;
-    double loadProgress = 0.0;
-    double writeProgress = 0.0;
+    juce::Label note;
+    juce::Label readOnlyBadge;
+    juce::TextButton revert { "Revert" };
+    juce::TextButton readButton { "Read settings" };
+    juce::Label choiceCaption;
+    juce::Label choiceHelper;
+    juce::ComboBox choice;
+    std::array<Slot, slotCount - 1> slots;
+    bool updating = false;
 };

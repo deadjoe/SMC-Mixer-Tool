@@ -1,524 +1,742 @@
 #include "MainComponent.h"
 
-GearButton::GearButton()
-    : juce::Button("Diagnostics")
+#include "BuildInfo.h"
+
+namespace
 {
-    setTooltip("Diagnostics");
+const juce::String ellipsis = juce::String::fromUTF8("\xe2\x80\xa6");
+
+juce::String records(int count)
+{
+    return juce::String(count) + (count == 1 ? " changed record" : " changed records");
+}
 }
 
-void GearButton::paintButton(juce::Graphics& graphics, bool highlighted, bool down)
+MainComponent::MainComponent(Options options)
 {
-    auto bounds = getLocalBounds().toFloat().reduced(5.0f);
-    const auto centre = bounds.getCentre();
-    const auto outer = bounds.getWidth() * 0.48f;
-    const auto inner = outer * 0.62f;
-    const auto hole = outer * 0.28f;
-    graphics.setColour(getToggleState() || down || highlighted ? mixerui::ink : mixerui::muted);
-
-    juce::Path teeth;
-    for (int index = 0; index < 8; ++index)
-    {
-        juce::Rectangle<float> tooth(-1.35f, -outer, 2.7f, outer - inner + 1.6f);
-        teeth.addRectangle(tooth.transformedBy(juce::AffineTransform::rotation(
-            juce::MathConstants<float>::twoPi * static_cast<float>(index) / 8.0f, 0.0f, 0.0f)));
-    }
-    teeth.addEllipse(-inner, -inner, inner * 2.0f, inner * 2.0f);
-    graphics.fillPath(teeth, juce::AffineTransform::translation(centre.x, centre.y));
-
-    graphics.setColour(mixerui::plate);
-    graphics.fillEllipse(centre.x - hole, centre.y - hole, hole * 2.0f, hole * 2.0f);
-}
-
-MainComponent::MainComponent()
-    : queryProgress(progressValue)
-{
+    juce::LookAndFeel::setDefaultLookAndFeel(&lookAndFeel);
     setLookAndFeel(&lookAndFeel);
+    setOpaque(true);
 
-    titleLabel.setText("SMC Mixer Tool", juce::dontSendNotification);
-    titleLabel.setFont(MixerLookAndFeel::font(24.0f, true));
-    versionLabel.setText(kSmcVersion, juce::dontSendNotification);
-    versionLabel.setFont(MixerLookAndFeel::font(11.0f));
-    versionLabel.setColour(juce::Label::textColourId, mixerui::muted);
-    versionLabel.setMinimumHorizontalScale(0.7f);
-    versionLabel.setTooltip("Version and build hash");
-    subtitleLabel.setText("CC / User settings for the M-VAVE SMC-Mixer", juce::dontSendNotification);
-    subtitleLabel.setFont(MixerLookAndFeel::font(12.0f));
-    subtitleLabel.setColour(juce::Label::textColourId, mixerui::muted);
-    statusLabel.setText("READY", juce::dontSendNotification);
-    statusLabel.setFont(MixerLookAndFeel::font(14.0f, true));
-    statusLabel.setJustificationType(juce::Justification::centredRight);
-    detailLabel.setText("USB-C and Bluetooth", juce::dontSendNotification);
-    detailLabel.setFont(MixerLookAndFeel::font(11.0f));
-    detailLabel.setColour(juce::Label::textColourId, mixerui::muted);
-    detailLabel.setJustificationType(juce::Justification::centredRight);
-    detailLabel.setMinimumHorizontalScale(0.55f);
-    connectionCaption.setText("CONNECTION", juce::dontSendNotification);
-    connectionCaption.setFont(MixerLookAndFeel::font(10.0f, true));
-    connectionCaption.setColour(juce::Label::textColourId, mixerui::muted);
-    connectionCaption.setJustificationType(juce::Justification::centredRight);
-
-    for (auto* label : { &titleLabel, &versionLabel, &subtitleLabel, &statusLabel, &detailLabel, &connectionCaption })
-        addAndMakeVisible(*label);
-
-    gearButton.onClick = [this] { showDiagnostics(!showingDiagnostics); };
-    gearButton.setMouseClickGrabsKeyboardFocus(false);
-    usbButton.onClick = [this] { selectTransport(TransportKind::usbC); };
-    bluetoothButton.onClick = [this] { selectTransport(TransportKind::bluetooth); };
-    refreshButton.onClick = [this] { refreshDevice(); };
-    for (auto* button : { &usbButton, &bluetoothButton, &refreshButton })
-        addAndMakeVisible(*button);
-    addAndMakeVisible(gearButton);
-
-    refreshButton.setColour(juce::TextButton::buttonColourId, mixerui::keyIdle);
-    refreshButton.setColour(juce::TextButton::textColourOffId, mixerui::ink);
-
-    queryProgress.setPercentageDisplay(false);
-    queryProgress.setVisible(false);
-    addAndMakeVisible(queryProgress);
-
-    addChildComponent(overview);
-    addChildComponent(diagnostics);
-    diagnostics.onReadSettings = [this] { readSettings(); };
-    overview.onSettingsRequired = [this] { readSettings(); };
-    overview.onControlEdited = [this](ControlSelection selection, DeviceProfile profile, EditableField field, std::uint8_t value) {
-        editControl(selection, profile, field, value);
+    confirm = [this](const Confirmation& confirmation, std::function<void(bool)> answer) {
+        auto box = juce::MessageBoxOptions::makeOptionsOkCancel(juce::MessageBoxIconType::WarningIcon, confirmation.title,
+                                                                confirmation.message, confirmation.confirmText,
+                                                                confirmation.cancelText, this);
+        // With two buttons the first returns 1.
+        messageBox = juce::NativeMessageBox::showScopedAsync(box, [reply = std::move(answer)](int result) { reply(result == 1); });
     };
-    overview.onRevertRequested = [this](ControlSelection selection, DeviceProfile profile) {
-        revertSelected(selection, profile);
-    };
-    overview.onWriteRequested = [this] { writeSettings(); };
-    overview.isRecordDirty = [this](ControlSelection selection, DeviceProfile profile) {
-        return document.isRecordDirty(selection, profile);
-    };
-    diagnostics.setActiveTransport(requestedTransport);
-    showDiagnostics(false);
-    updateSelectionColours();
 
-    startTimer(100);
-    refreshDevice();
+    addAndMakeVisible(headerBar);
+    addAndMakeVisible(overviewView);
+    addChildComponent(diagnosticsView);
+    addChildComponent(toastView);
+    toastView.onLayoutChange = [this] { resized(); };
+
+    headerBar.onTransportChosen = [this](TransportKind kind) { chooseTransport(kind); };
+    headerBar.onRefresh = [this] { refresh(); };
+    headerBar.onDiagnosticsToggled = [this](bool show) { showDiagnostics(show); };
+
+    overviewView.onProfileChosen = [this](DeviceProfile profile) { chooseProfile(profile); };
+    overviewView.onWrite = [this] { write(); };
+    overviewView.onRevertAll = [this] { revertAll(); };
+    overviewView.onUndo = [this] { undo(); };
+    overviewView.onRedo = [this] { redo(); };
+    overviewView.onExport = [this] { exportProfile(); };
+    overviewView.onCopy = [this] { copyProfile(); };
+    overviewView.diagram().onControlSelected = [this](ControlSelection control) { selectControl(control); };
+    auto& inspector = overviewView.inspector();
+    inspector.onControlEdited = [this](ControlSelection control, DeviceProfile profile, EditableField field,
+                                       std::uint8_t value, bool continuing) {
+        editControl(control, profile, field, value, continuing);
+    };
+    inspector.onRevertRequested = [this](ControlSelection, DeviceProfile) { revertControl(); };
+    inspector.onReadRequested = [this] { readSettings(); };
+    inspector.onNotice = [this](const juce::String& message, mixerui::Tone tone) { notify(message, tone); };
+
+    diagnosticsView.onReadSettings = [this] { readSettings(); };
+    diagnosticsView.onNotice = [this](const juce::String& message, mixerui::Tone tone) { notify(message, tone); };
+    diagnosticsView.setActiveTransport(transport);
+
+    commandManager.registerAllCommandsForTarget(this);
+    commandManager.setFirstCommandTarget(this);
+    addKeyListener(commandManager.getKeyMappings());
+
+    publish();
+    startTimer(50);
+    if (options.connectOnStart)
+        refreshNow();
+    else
+        headerBar.setStatus({ mixerui::Tone::neutral, "Ready", "Choose USB-C or Bluetooth, then Refresh.", {} });
 }
 
 MainComponent::~MainComponent()
 {
     stopTimer();
-    diagnostics.onReadSettings = nullptr;
-    overview.onSettingsRequired = nullptr;
-    overview.onControlEdited = nullptr;
-    overview.onRevertRequested = nullptr;
-    overview.onWriteRequested = nullptr;
-    overview.isRecordDirty = nullptr;
+    removeKeyListener(commandManager.getKeyMappings());
     controller.shutdown();
     setLookAndFeel(nullptr);
-}
-
-void MainComponent::selectTransport(TransportKind transport)
-{
-    if (busy)
-        return;
-    confirmDiscard([this, transport] {
-        if (busy)
-            return;
-        requestedTransport = transport;
-        diagnostics.setActiveTransport(transport);
-        updateSelectionColours();
-        refreshDeviceNow();
-    });
-}
-
-void MainComponent::showDiagnostics(bool shouldShowDiagnostics)
-{
-    showingDiagnostics = shouldShowDiagnostics;
-    overview.setVisible(!showingDiagnostics);
-    diagnostics.setVisible(showingDiagnostics);
-    if (shouldShowDiagnostics)
-        diagnostics.refreshEndpoints();
-    updateSelectionColours();
-}
-
-void MainComponent::updateSelectionColours()
-{
-    const auto style = [](juce::TextButton& button, bool selected) {
-        button.setColour(juce::TextButton::buttonColourId, selected ? mixerui::keyDown : mixerui::keyIdle);
-        button.setColour(juce::TextButton::textColourOffId, selected ? mixerui::onShell : mixerui::ink);
-        button.repaint();
-    };
-    gearButton.setToggleState(showingDiagnostics, juce::dontSendNotification);
-    style(usbButton, requestedTransport == TransportKind::usbC);
-    style(bluetoothButton, requestedTransport == TransportKind::bluetooth);
+    juce::LookAndFeel::setDefaultLookAndFeel(nullptr);
 }
 
 bool MainComponent::hasUnsavedEdits() const
 {
-    return document.isDirty();
+    return settings.isDirty();
 }
 
 bool MainComponent::editingEnabled() const
 {
-    return !busy && document.loaded();
+    return activity == Activity::idle && settings.loaded() && viewProfile == DeviceProfile::ccUser;
 }
 
-void MainComponent::confirmDiscard(std::function<void()> onConfirmed)
+juce::String MainComponent::linkName() const
 {
-    if (!document.isDirty())
-    {
-        if (onConfirmed)
-            onConfirmed();
-        return;
-    }
-    confirmThen(juce::MessageBoxIconType::WarningIcon,
-                "Unsaved edits",
-                "This reads the device again and discards CC / User edits that have not been written.",
-                "Read again",
-                "Keep edits",
-                std::move(onConfirmed));
+    return transport == TransportKind::bluetooth ? "Bluetooth" : "USB-C";
 }
 
-void MainComponent::confirmThen(juce::MessageBoxIconType icon,
-                                const juce::String& title,
-                                const juce::String& message,
-                                const juce::String& confirmText,
-                                const juce::String& cancelText,
-                                std::function<void()> onConfirmed)
+void MainComponent::notify(const juce::String& message, mixerui::Tone tone)
 {
-    if (choicePending)
+    toastView.show(message, tone);
+}
+
+void MainComponent::ask(const Confirmation& confirmation, std::function<void()> onConfirmed)
+{
+    if (choicePending || !confirm)
         return;
     choicePending = true;
-    // JUCE 9 leaves modal loops off, so this returns before the click. 1 is the confirm button.
-    juce::AlertWindow::showOkCancelBox(
-        icon,
-        title,
-        message,
-        confirmText,
-        cancelText,
-        this,
-        juce::ModalCallbackFunction::create(
-            [safe = juce::Component::SafePointer<MainComponent>(this),
-             action = std::move(onConfirmed)](int result) {
-                if (safe == nullptr)
-                    return;
-                safe->choicePending = false;
-                if (result == 1 && action)
-                    action();
-            }));
-}
-
-void MainComponent::publishDocument(bool resetEditors)
-{
-    if (!document.loaded())
-        return;
-    const auto configuration = document.configuration();
-    const auto dirty = document.dirtyControls();
-    if (resetEditors)
-        overview.showWorkingCopy(configuration, dirty, editingEnabled());
-    else
-        overview.cacheWorkingCopy(configuration, dirty);
-}
-
-void MainComponent::refreshDevice()
-{
-    if (busy)
-        return;
-    confirmDiscard([this] {
-        if (!busy)
-            refreshDeviceNow();
+    confirm(confirmation, [safe = juce::Component::SafePointer<MainComponent>(this), action = std::move(onConfirmed)](bool yes) {
+        if (safe == nullptr)
+            return;
+        safe->choicePending = false;
+        if (yes && action)
+            action();
     });
 }
 
-void MainComponent::refreshDeviceNow()
+void MainComponent::askBeforeDiscarding(const juce::String& action, std::function<void()> onConfirmed)
 {
-    if (!controller.requestRefresh(requestedTransport))
+    if (!settings.isDirty())
+    {
+        onConfirmed();
         return;
+    }
+    const auto count = static_cast<int>(settings.dirtySpans().size());
+    ask({ "Discard unsaved edits?",
+          action + " discards " + records(count) + " that " + (count == 1 ? "has" : "have")
+              + " not been written to the mixer.",
+          "Discard edits", "Keep editing" },
+        std::move(onConfirmed));
+}
 
-    hasSnapshot = false;
-    document.clear();
-    overview.clear(requestedTransport);
-    diagnostics.clearSnapshot();
-    diagnostics.refreshEndpoints();
-    statusLabel.setColour(juce::Label::textColourId, mixerui::ink);
-    statusLabel.setText("CONNECTING", juce::dontSendNotification);
-    detailLabel.setColour(juce::Label::textColourId, mixerui::muted);
-    detailLabel.setText(requestedTransport == TransportKind::usbC
-                            ? "Reading USB-C device data..."
-                            : "Scanning Bluetooth and reading device data...",
-                        juce::dontSendNotification);
-    setBusy(true, false);
+void MainComponent::requestQuit(std::function<void()> quit)
+{
+    if (activity == Activity::writing)
+    {
+        ask({ "A write is in progress",
+              "Quitting now stops the write before the mixer saves. Records that already reached it stay in its "
+              "memory until it is switched off.",
+              "Quit anyway", "Keep writing" },
+            std::move(quit));
+        return;
+    }
+    if (settings.isDirty())
+    {
+        askBeforeDiscarding("Quitting", std::move(quit));
+        return;
+    }
+    quit();
+}
+
+void MainComponent::setActivity(Activity next)
+{
+    activity = next;
+    const auto busy = activity != Activity::idle;
+    headerBar.setBusy(busy);
+    diagnosticsView.setBusy(busy);
+    headerBar.setProgress(activity == Activity::refreshing ? -1.0 : busy ? 0.0 : -2.0);
+}
+
+void MainComponent::publish()
+{
+    if (settings.loaded())
+        configuration = settings.configuration();
+    else
+        configuration.reset();
+
+    const ControlProfile* profile = configuration ? &configuration->profile(viewProfile) : nullptr;
+    // Edit dots mark the profile on screen; the DAW profile never has any.
+    std::vector<ControlSelection> dirty;
+    for (const auto& control : settings.dirtyControls())
+        if (settings.isRecordDirty(control, viewProfile))
+            dirty.push_back(control);
+    auto& diagram = overviewView.diagram();
+    diagram.setProfile(profile);
+    diagram.setDirtyControls(dirty);
+    diagram.setSelection(selection);
+
+    ControlInspectorComponent::View view;
+    view.profile = profile;
+    view.profileKind = viewProfile;
+    view.selection = selection;
+    view.editable = editingEnabled();
+    view.selectionDirty = selection && settings.isRecordDirty(*selection, viewProfile);
+    if (profile == nullptr)
+    {
+        switch (activity)
+        {
+            case Activity::refreshing: view.emptyMessage = "Connecting over " + linkName() + ellipsis; break;
+            case Activity::readingSettings: view.emptyMessage = "Reading the settings from the mixer" + ellipsis; break;
+            case Activity::writing:
+            case Activity::idle:
+                view.emptyMessage = settingsProblem.isNotEmpty()
+                    ? "The settings could not be read. " + settingsProblem
+                    : juce::String("The settings are read when the mixer connects. Refresh to connect again.");
+                view.offerRead = snapshot.has_value() || settingsProblem.isNotEmpty();
+                break;
+        }
+    }
+    overviewView.inspector().show(view);
+
+    const auto changed = static_cast<int>(settings.dirtySpans().size());
+    const auto idle = activity == Activity::idle;
+    overviewView.setActions({ changed,
+                              idle && changed > 0,
+                              idle && changed > 0,
+                              idle && settings.canUndo(),
+                              idle && settings.canRedo(),
+                              profile != nullptr,
+                              profile != nullptr });
+    overviewView.setProfileKind(viewProfile);
+    commandManager.commandStatusChanged();
+}
+
+void MainComponent::showOnlineStatus()
+{
+    if (!snapshot)
+        return;
+    const auto& device = *snapshot;
+    juce::StringArray facts { linkName() };
+    juce::String tooltip;
+    if (device.transport == TransportKind::usbC)
+    {
+        facts.add(mixerui::utf8(device.sourceName));
+        tooltip = "MIDI in: " + mixerui::utf8(device.sourceName) + "\nMIDI out: " + mixerui::utf8(device.destinationName);
+    }
+    else if (device.hasHealth)
+    {
+        if (device.health.battery)
+            facts.add("Battery " + juce::String(*device.health.battery) + "%");
+        if (device.health.rssi)
+            facts.add(juce::String(*device.health.rssi) + " dBm");
+        if (device.health.manufacturer)
+            facts.add(mixerui::utf8(*device.health.manufacturer));
+    }
+    else
+    {
+        facts.add("Battery and signal unavailable");
+        tooltip = "Refresh over Bluetooth to try reading battery and signal again.";
+    }
+
+    const auto tone = device.warning.empty() ? mixerui::Tone::success : mixerui::Tone::warning;
+    headerBar.setStatus({ tone, "Online", facts.joinIntoString(juce::String::fromUTF8("  \xc2\xb7  ")), tooltip });
+}
+
+void MainComponent::refresh()
+{
+    if (activity != Activity::idle)
+        return;
+    askBeforeDiscarding("Reading the mixer again", [this] {
+        if (activity == Activity::idle)
+            refreshNow();
+    });
+}
+
+void MainComponent::refreshNow()
+{
+    if (!controller.requestRefresh(transport, true))
+        return;
+    settings.clear();
+    snapshot.reset();
+    settingsProblem.clear();
+    diagnosticsView.clearSnapshot();
+    diagnosticsView.refreshEndpoints();
+    headerBar.setDevice("SMC-Mixer", {});
+    headerBar.setStatus({ mixerui::Tone::busy, "Connecting",
+                          transport == TransportKind::usbC ? "Looking for the mixer on USB-C" + ellipsis
+                                                           : "Scanning Bluetooth for the mixer" + ellipsis,
+                          {} });
+    setActivity(Activity::refreshing);
+    publish();
 }
 
 void MainComponent::readSettings()
 {
-    if (busy)
-    {
-        overview.setSettingsError("The device is busy. Select the control again in a moment.");
+    if (activity != Activity::idle)
         return;
-    }
-    confirmDiscard([this] {
-        if (!busy)
+    askBeforeDiscarding("Reading the settings again", [this] {
+        if (activity == Activity::idle)
             readSettingsNow();
     });
 }
 
 void MainComponent::readSettingsNow()
 {
-    if (!controller.requestSettings(requestedTransport))
-    {
-        overview.setSettingsError("The device is busy. Select the control again in a moment.");
+    if (!controller.requestSettings(transport))
         return;
-    }
-
-    overview.setSettingsLoading(true, 0.0);
-    statusLabel.setColour(juce::Label::textColourId, mixerui::ink);
-    statusLabel.setText("READING SNAPSHOT", juce::dontSendNotification);
-    detailLabel.setColour(juce::Label::textColourId, mixerui::muted);
-    detailLabel.setText("Reading 6,282 bytes in chunks. Keep the device connected.", juce::dontSendNotification);
-    setBusy(true, true);
+    // The settings on screen stay, read-only, until the new image arrives.
+    settingsProblem.clear();
+    headerBar.setStatus({ mixerui::Tone::busy, "Reading settings", "Reading 6,282 bytes. Keep the mixer connected.", {} });
+    setActivity(Activity::readingSettings);
+    publish();
 }
 
-void MainComponent::editControl(ControlSelection selection,
-                               DeviceProfile profile,
-                               EditableField field,
-                               std::uint8_t value)
+void MainComponent::write()
 {
-    std::string error;
-    if (!document.apply(selection, profile, field, value, error))
-    {
-        publishDocument(true);
-        if (!error.empty())
-            overview.setSettingsError(mixerui::utf8(error));
+    if (activity != Activity::idle || !settings.isDirty())
         return;
-    }
-    publishDocument(false);
-}
-
-void MainComponent::revertSelected(ControlSelection selection, DeviceProfile profile)
-{
-    if (!document.loaded())
-        return;
-    document.revert(selection, profile);
-    publishDocument(true);
-}
-
-void MainComponent::writeSettings()
-{
-    if (busy || !document.isDirty())
-        return;
-    const auto spans = document.dirtySpans();
-    if (spans.empty())
-        return;
-
-    const auto count = static_cast<int>(spans.size());
-    const auto link = requestedTransport == TransportKind::bluetooth ? "Bluetooth" : "USB-C";
-    confirmThen(juce::MessageBoxIconType::QuestionIcon,
-                "Write settings",
-                "Write " + juce::String(count) + (count == 1 ? " changed record" : " changed records")
-                    + " to the SMC-Mixer over " + link + "? The mixer saves them and keeps its current mode.",
-                "Write",
-                "Cancel",
-                [this] { startWrite(); });
+    const auto count = static_cast<int>(settings.dirtySpans().size());
+    ask({ "Write to the mixer?",
+          "Write " + records(count) + " over " + linkName()
+              + ". Each record is read back and checked, then the mixer saves them to flash. Its live mode stays as it is.",
+          "Write", "Cancel" },
+        [this] { startWrite(); });
 }
 
 void MainComponent::startWrite()
 {
-    if (busy || !document.isDirty())
+    if (activity != Activity::idle || !settings.isDirty())
         return;
+    if (!controller.requestWrite(transport, settings.dirtySpans()))
+        return;
+    headerBar.setStatus({ mixerui::Tone::busy, "Writing", "Writing, checking, and saving the changed records" + ellipsis, {} });
+    setActivity(Activity::writing);
+    publish();
+}
 
-    auto freshSpans = document.dirtySpans();
-    if (freshSpans.empty())
-        return;
-    if (!controller.requestWrite(requestedTransport, std::move(freshSpans)))
+void MainComponent::chooseTransport(TransportKind kind)
+{
+    if (activity != Activity::idle || kind == transport)
     {
-        overview.setSettingsError("The device is busy. Try the write again in a moment.");
+        headerBar.setTransport(transport);
         return;
     }
-
-    overview.setSettingsWriting(true, 0.0);
-    statusLabel.setColour(juce::Label::textColourId, mixerui::ink);
-    statusLabel.setText("WRITING", juce::dontSendNotification);
-    detailLabel.setColour(juce::Label::textColourId, mixerui::muted);
-    detailLabel.setText("Writing changed records, reading them back, then saving them on the mixer.",
-                        juce::dontSendNotification);
-    setBusy(true, true);
+    headerBar.setTransport(transport);
+    askBeforeDiscarding("Switching the link", [this, kind] {
+        if (activity != Activity::idle)
+            return;
+        transport = kind;
+        headerBar.setTransport(transport);
+        diagnosticsView.setActiveTransport(transport);
+        refreshNow();
+    });
 }
 
-void MainComponent::setBusy(bool shouldBeBusy, bool settingsOperation)
+void MainComponent::chooseProfile(DeviceProfile profile)
 {
-    busy = shouldBeBusy;
-    usbButton.setEnabled(!busy);
-    bluetoothButton.setEnabled(!busy);
-    refreshButton.setEnabled(!busy);
-    queryProgress.setVisible(busy);
-    progressValue = settingsOperation ? 0.0 : -1.0;
-    queryProgress.repaint();
-    diagnostics.setBusy(busy, progressValue, settingsOperation);
+    viewProfile = profile;
+    publish();
 }
 
-void MainComponent::finishBusyState()
+void MainComponent::showDiagnostics(bool show)
 {
-    busy = false;
-    usbButton.setEnabled(true);
-    bluetoothButton.setEnabled(true);
-    refreshButton.setEnabled(true);
-    queryProgress.setVisible(false);
+    showingDiagnostics = show;
+    headerBar.setDiagnosticsShown(show);
+    overviewView.setVisible(!show);
+    diagnosticsView.setVisible(show);
+    if (show)
+        diagnosticsView.refreshEndpoints();
+    commandManager.commandStatusChanged();
+}
+
+void MainComponent::selectControl(ControlSelection control)
+{
+    if (!isValidControl(control))
+        return;
+    selection = control;
+    publish();
+}
+
+void MainComponent::editControl(ControlSelection control, DeviceProfile profile, EditableField field,
+                                std::uint8_t value, bool continuing)
+{
+    if (!editingEnabled())
+        return;
+    const auto result = settings.apply(control, profile, field, value, continuing);
+    if (!result.message.empty())
+        notify(mixerui::utf8(result.message), result.applied ? mixerui::Tone::neutral : mixerui::Tone::warning);
+    publish();
+}
+
+void MainComponent::revertControl()
+{
+    if (!selection || !editingEnabled() || !settings.isRecordDirty(*selection, viewProfile))
+        return;
+    settings.revert(*selection, viewProfile);
+    publish();
+}
+
+void MainComponent::revertAll()
+{
+    if (activity != Activity::idle || !settings.isDirty())
+        return;
+    settings.revertAll();
+    notify("Every unsaved edit was reverted. Undo brings them back.", mixerui::Tone::neutral);
+    publish();
+}
+
+void MainComponent::undo()
+{
+    if (activity == Activity::idle && settings.undo())
+        publish();
+}
+
+void MainComponent::redo()
+{
+    if (activity == Activity::idle && settings.redo())
+        publish();
+}
+
+void MainComponent::exportProfile()
+{
+    if (!configuration)
+        return;
+    const auto name = mixerui::utf8(profileName(viewProfile));
+    const auto fileName = viewProfile == DeviceProfile::ccUser ? "SMC-Mixer-CC-User.json" : "SMC-Mixer-DAW.json";
+    const auto json = mixerui::utf8(configuration->toJson(viewProfile));
+    fileChooser = std::make_unique<juce::FileChooser>(
+        "Export the " + name + " profile",
+        juce::File::getSpecialLocation(juce::File::userDocumentsDirectory).getChildFile(fileName), "*.json");
+    fileChooser->launchAsync(juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::canSelectFiles
+                                 | juce::FileBrowserComponent::warnAboutOverwriting,
+                             [safe = juce::Component::SafePointer<MainComponent>(this), json, name](const juce::FileChooser& chooser) {
+                                 if (safe == nullptr)
+                                     return;
+                                 const auto file = chooser.getResult();
+                                 safe->fileChooser.reset();
+                                 if (file == juce::File())
+                                     return;
+                                 if (file.replaceWithText(json))
+                                     safe->notify("Exported the " + name + " profile to " + file.getFileName() + ".",
+                                                  mixerui::Tone::success);
+                                 else
+                                     safe->notify("Could not write the file. Check the location and permissions.",
+                                                  mixerui::Tone::error);
+                             });
+}
+
+void MainComponent::copyProfile()
+{
+    if (!configuration)
+        return;
+    juce::SystemClipboard::copyTextToClipboard(mixerui::utf8(configuration->toJson(viewProfile)));
+    notify("Copied the " + mixerui::utf8(profileName(viewProfile)) + " profile as JSON.", mixerui::Tone::success);
+}
+
+void MainComponent::showAbout()
+{
+    auto box = juce::MessageBoxOptions::makeOptionsOk(
+        juce::MessageBoxIconType::NoIcon, "SMC Mixer Tool",
+        "Version " + juce::String(kSmcVersion)
+            + "\n\nReads and edits the CC / User profile of the M-VAVE SMC-Mixer over USB-C or Bluetooth.",
+        "OK", this);
+    messageBox = juce::NativeMessageBox::showScopedAsync(box, nullptr);
 }
 
 void MainComponent::timerCallback()
 {
     for (auto& event : controller.pollEvents())
-        handleEvent(std::move(event));
+        deliver(std::move(event));
 }
 
-void MainComponent::handleEvent(DeviceEvent event)
+void MainComponent::deliver(DeviceEvent event)
 {
     switch (event.kind)
     {
         case DeviceEvent::Kind::snapshotReady:
         {
-            finishBusyState();
-            diagnostics.setBusy(false, 1.0, false);
-            currentSnapshot = event.snapshot;
-            hasSnapshot = true;
-            overview.setSnapshot(currentSnapshot);
-            diagnostics.setSnapshot(currentSnapshot);
-            statusLabel.setColour(juce::Label::textColourId,
-                                  currentSnapshot.warning.empty() ? mixerui::success : mixerui::warning);
-            statusLabel.setText("ONLINE / " + mixerui::utf8(currentSnapshot.version.versionLabel),
-                                juce::dontSendNotification);
-            detailLabel.setColour(juce::Label::textColourId,
-                                  currentSnapshot.warning.empty() ? mixerui::muted : mixerui::warning);
-            detailLabel.setText(currentSnapshot.warning.empty()
-                                    ? (currentSnapshot.transport == TransportKind::usbC
-                                           ? "USB-C link is healthy" : "Bluetooth link is healthy")
-                                    : "Firmware online; some wireless health fields are unavailable",
-                                juce::dontSendNotification);
+            snapshot = event.snapshot;
+            diagnosticsView.setSnapshot(event.snapshot);
+            headerBar.setDevice(mixerui::utf8(event.snapshot.version.deviceName), mixerui::utf8(event.snapshot.version.versionLabel));
+            if (activity == Activity::refreshing)
+            {
+                // The same request reads the settings next.
+                setActivity(Activity::readingSettings);
+                headerBar.setStatus({ mixerui::Tone::busy, "Reading settings", "Reading 6,282 bytes. Keep the mixer connected.", {} });
+            }
+            else
+            {
+                setActivity(Activity::idle);
+                showOnlineStatus();
+            }
             break;
         }
         case DeviceEvent::Kind::settingsProgress:
-            progressValue = event.progress;
-            queryProgress.repaint();
-            diagnostics.setBusy(true, progressValue, true);
-            if (event.writeOperation)
-                overview.setSettingsWriting(true, progressValue);
-            else
-                overview.setSettingsLoading(true, progressValue);
-            break;
-        case DeviceEvent::Kind::settingsReady:
-            finishBusyState();
-            diagnostics.setBusy(false, 1.0, true);
-            diagnostics.setSettings(event.settings);
-            try
-            {
-                document.load(event.settings.data);
-                publishDocument(true);
-            }
-            catch (const std::exception& error)
-            {
-                overview.setSettingsError(mixerui::utf8(error.what()));
-                statusLabel.setColour(juce::Label::textColourId, mixerui::error);
-                statusLabel.setText("SNAPSHOT FAILED", juce::dontSendNotification);
-                detailLabel.setColour(juce::Label::textColourId, mixerui::error);
-                detailLabel.setText("Settings snapshot could not be read.", juce::dontSendNotification);
-                detailLabel.setTooltip(mixerui::utf8(error.what()));
-                break;
-            }
-            statusLabel.setColour(juce::Label::textColourId, mixerui::success);
-            statusLabel.setText(hasSnapshot ? "ONLINE / " + mixerui::utf8(currentSnapshot.version.versionLabel)
-                                            : "SNAPSHOT READY",
-                                juce::dontSendNotification);
-            detailLabel.setColour(juce::Label::textColourId, mixerui::success);
-            detailLabel.setText("Settings snapshot complete / "
-                                    + juce::String(static_cast<int>(event.settings.data.size())) + " bytes",
-                                juce::dontSendNotification);
-            break;
-        case DeviceEvent::Kind::settingsWritten:
-            finishBusyState();
-            diagnostics.setBusy(false, 1.0, true);
-            try
-            {
-                document.noteVerified(event.written);
-                diagnostics.adoptWorkingImage(document.workingBytes());
-                publishDocument(true);
-                statusLabel.setColour(juce::Label::textColourId, mixerui::success);
-                statusLabel.setText(hasSnapshot ? "ONLINE / " + mixerui::utf8(currentSnapshot.version.versionLabel)
-                                                : "WRITE VERIFIED",
-                                    juce::dontSendNotification);
-                detailLabel.setColour(juce::Label::textColourId, mixerui::success);
-                detailLabel.setText("Write verified and saved. Read-back matches, and the mixer stored it in flash.",
-                                    juce::dontSendNotification);
-            }
-            catch (const std::exception& error)
-            {
-                publishDocument(true);
-                overview.setSettingsError("The mixer saved the write, but it no longer matches the edits on screen."
-                                          " Read the snapshot again.");
-                statusLabel.setColour(juce::Label::textColourId, mixerui::error);
-                statusLabel.setText("WRITE FAILED", juce::dontSendNotification);
-                detailLabel.setColour(juce::Label::textColourId, mixerui::error);
-                detailLabel.setText("Saved, but the edits on screen differ. Read the snapshot again.",
-                                    juce::dontSendNotification);
-                detailLabel.setTooltip(mixerui::utf8(error.what()));
-            }
-            break;
-        case DeviceEvent::Kind::operationFailed:
         {
-            finishBusyState();
-            diagnostics.setBusy(false, 0.0, event.settingsOperation);
+            headerBar.setProgress(event.progress);
+            const auto percent = juce::String(juce::roundToInt(juce::jlimit(0.0, 1.0, event.progress) * 100.0)) + "%";
             if (event.writeOperation)
-                publishDocument(true);
-            const auto summary = event.writeOperation
-                ? juce::String("Settings write failed. Your edits are kept, so Write can try again.")
-                : event.settingsOperation
-                    ? juce::String("Settings read failed. Check the connection and retry.")
-                    : event.transport == TransportKind::bluetooth
-                        ? juce::String("Bluetooth failed. Check macOS permission and Audio MIDI Setup.")
-                        : juce::String("USB-C device not found or not responding.");
-            auto detail = summary;
-            if (!event.message.empty())
-                detail += "\n" + mixerui::utf8(event.message);
-            const auto visible = event.message.empty() ? summary : mixerui::utf8(event.message);
-            diagnostics.setError(detail);
-            if (event.settingsOperation)
-                overview.setSettingsError(visible);
-            statusLabel.setColour(juce::Label::textColourId, mixerui::error);
-            statusLabel.setText(event.writeOperation ? "WRITE FAILED"
-                                    : event.settingsOperation ? "SNAPSHOT FAILED" : "CONNECTION FAILED",
-                                juce::dontSendNotification);
-            detailLabel.setColour(juce::Label::textColourId, mixerui::error);
-            detailLabel.setText(visible, juce::dontSendNotification);
-            detailLabel.setTooltip(detail);
-            if (!event.settingsOperation)
+                headerBar.setStatus({ mixerui::Tone::busy, "Writing", "Writing, checking, and saving " + ellipsis + " " + percent, {} });
+            else
+                headerBar.setStatus({ mixerui::Tone::busy, "Reading settings", "Reading 6,282 bytes " + ellipsis + " " + percent, {} });
+            break;
+        }
+        case DeviceEvent::Kind::settingsReady:
+        {
+            setActivity(Activity::idle);
+            diagnosticsView.setSettings(event.settings);
+            try
             {
-                hasSnapshot = false;
-                overview.clear(event.transport);
-                diagnostics.clearSnapshot();
+                settings.load(event.settings.data);
+                settingsProblem.clear();
+                if (!selection)
+                    selection = ControlSelection { ControlKind::knob, 0 };
+                showOnlineStatus();
+            }
+            catch (const std::exception& error)
+            {
+                settingsProblem = mixerui::utf8(error.what());
+                headerBar.setStatus({ mixerui::Tone::error, "Settings unreadable", settingsProblem, settingsProblem });
+                diagnosticsView.setLastError(settingsProblem);
             }
             break;
         }
+        case DeviceEvent::Kind::settingsWritten:
+        {
+            setActivity(Activity::idle);
+            try
+            {
+                settings.noteVerified(event.written);
+                diagnosticsView.adoptWorkingImage(settings.workingBytes());
+                showOnlineStatus();
+                notify("Wrote " + records(static_cast<int>(event.written.size()))
+                           + ". The mixer read them back and saved them to flash.",
+                       mixerui::Tone::success);
+            }
+            catch (const std::exception& error)
+            {
+                const auto detail = mixerui::utf8(error.what());
+                headerBar.setStatus({ mixerui::Tone::error, "Write unclear",
+                                      "The mixer saved the write, but it differs from the edits on screen. Read the settings again.",
+                                      detail });
+                diagnosticsView.setLastError(detail);
+            }
+            break;
+        }
+        case DeviceEvent::Kind::operationFailed:
+        {
+            setActivity(Activity::idle);
+            const auto detail = mixerui::utf8(event.message);
+            juce::String state;
+            juce::String summary;
+            if (event.writeOperation)
+            {
+                state = "Write failed";
+                summary = "Your edits are kept, so Write can try again.";
+            }
+            else if (event.settingsOperation)
+            {
+                state = "Settings unreadable";
+                summary = "Check the connection, then read the settings again.";
+                settingsProblem = detail;
+            }
+            else
+            {
+                state = "Not connected";
+                summary = transport == TransportKind::bluetooth
+                    ? juce::String("Check the macOS Bluetooth permission and Audio MIDI Setup.")
+                    : juce::String("Check the cable and that the mixer is switched on.");
+                snapshot.reset();
+                headerBar.setDevice("SMC-Mixer", {});
+                diagnosticsView.clearSnapshot();
+            }
+            headerBar.setStatus({ mixerui::Tone::error, state, detail.isNotEmpty() ? detail : summary, summary + "\n" + detail });
+            diagnosticsView.setLastError(state + ": " + detail);
+            if (event.writeOperation)
+                notify("Write failed. " + summary, mixerui::Tone::error);
+            break;
+        }
     }
+    publish();
+}
+
+void MainComponent::getAllCommands(juce::Array<juce::CommandID>& ids)
+{
+    ids.addArray({ refreshCommand, readSettingsCommand, writeCommand, exportProfileCommand, copyProfileCommand,
+                   exportImageCommand, undoCommand, redoCommand, revertControlCommand, revertAllCommand,
+                   showCcUserCommand, showDawCommand, toggleDiagnosticsCommand, useUsbCommand, useBluetoothCommand,
+                   aboutCommand });
+}
+
+void MainComponent::getCommandInfo(juce::CommandID id, juce::ApplicationCommandInfo& info)
+{
+    const auto idle = activity == Activity::idle;
+    const auto loaded = configuration.has_value();
+    const auto command = juce::ModifierKeys::commandModifier;
+    const auto shift = juce::ModifierKeys::shiftModifier;
+
+    switch (id)
+    {
+        case refreshCommand:
+            info.setInfo("Refresh", "Read the identity and settings again", "Device", 0);
+            info.addDefaultKeypress('r', command);
+            info.setActive(idle);
+            break;
+        case readSettingsCommand:
+            info.setInfo("Read Settings", "Read the settings image again", "Device", 0);
+            info.addDefaultKeypress('r', command | shift);
+            info.setActive(idle);
+            break;
+        case writeCommand:
+            info.setInfo("Write Changes" + ellipsis, "Write the changed records to the mixer", "Device", 0);
+            info.addDefaultKeypress('s', command);
+            info.setActive(idle && settings.isDirty());
+            break;
+        case useUsbCommand:
+            info.setInfo("Use USB-C", "Connect over the USB-C cable", "Device", 0);
+            info.setActive(idle);
+            info.setTicked(transport == TransportKind::usbC);
+            break;
+        case useBluetoothCommand:
+            info.setInfo("Use Bluetooth", "Connect over Bluetooth", "Device", 0);
+            info.setActive(idle);
+            info.setTicked(transport == TransportKind::bluetooth);
+            break;
+        case exportProfileCommand:
+            info.setInfo("Export Profile" + ellipsis, "Save the profile on screen as JSON", "File", 0);
+            info.addDefaultKeypress('e', command);
+            info.setActive(loaded);
+            break;
+        case copyProfileCommand:
+            info.setInfo("Copy Profile as JSON", "Copy the profile on screen as JSON", "File", 0);
+            info.addDefaultKeypress('c', command | shift);
+            info.setActive(loaded);
+            break;
+        case exportImageCommand:
+            info.setInfo("Export Settings Image" + ellipsis, "Save the 6,282-byte settings image", "File", 0);
+            info.setActive(idle && settings.loaded());
+            break;
+        case undoCommand:
+            info.setInfo("Undo", "Undo the last edit", "Edit", 0);
+            info.addDefaultKeypress('z', command);
+            info.setActive(idle && settings.canUndo());
+            break;
+        case redoCommand:
+            info.setInfo("Redo", "Redo the last undone edit", "Edit", 0);
+            info.addDefaultKeypress('z', command | shift);
+            info.setActive(idle && settings.canRedo());
+            break;
+        case revertControlCommand:
+            info.setInfo("Revert Control", "Restore the selected control as read", "Edit", 0);
+            info.addDefaultKeypress(juce::KeyPress::backspaceKey, command);
+            info.setActive(selection.has_value() && editingEnabled() && settings.isRecordDirty(*selection, viewProfile));
+            break;
+        case revertAllCommand:
+            info.setInfo("Revert All Changes", "Discard every unsaved edit", "Edit", 0);
+            info.setActive(idle && settings.isDirty());
+            break;
+        case showCcUserCommand:
+            info.setInfo("CC / User Profile", "Show the CC / User profile", "View", 0);
+            info.addDefaultKeypress('1', command);
+            info.setActive(loaded);
+            info.setTicked(viewProfile == DeviceProfile::ccUser);
+            break;
+        case showDawCommand:
+            info.setInfo("DAW Profile", "Show the DAW profile", "View", 0);
+            info.addDefaultKeypress('2', command);
+            info.setActive(loaded);
+            info.setTicked(viewProfile == DeviceProfile::daw);
+            break;
+        case toggleDiagnosticsCommand:
+            info.setInfo("Diagnostics", "Show the link report", "View", 0);
+            info.addDefaultKeypress('d', command | shift);
+            info.setTicked(showingDiagnostics);
+            break;
+        case aboutCommand:
+            info.setInfo("About SMC Mixer Tool", "Show the version", "Help", 0);
+            break;
+        default:
+            break;
+    }
+}
+
+bool MainComponent::perform(const InvocationInfo& info)
+{
+    switch (info.commandID)
+    {
+        case refreshCommand: refresh(); return true;
+        case readSettingsCommand: readSettings(); return true;
+        case writeCommand: write(); return true;
+        case useUsbCommand: chooseTransport(TransportKind::usbC); return true;
+        case useBluetoothCommand: chooseTransport(TransportKind::bluetooth); return true;
+        case exportProfileCommand: exportProfile(); return true;
+        case copyProfileCommand: copyProfile(); return true;
+        case exportImageCommand: diagnosticsView.exportSettings(); return true;
+        case undoCommand: undo(); return true;
+        case redoCommand: redo(); return true;
+        case revertControlCommand: revertControl(); return true;
+        case revertAllCommand: revertAll(); return true;
+        case showCcUserCommand: chooseProfile(DeviceProfile::ccUser); return true;
+        case showDawCommand: chooseProfile(DeviceProfile::daw); return true;
+        case toggleDiagnosticsCommand: showDiagnostics(!showingDiagnostics); return true;
+        case aboutCommand: showAbout(); return true;
+        default: return false;
+    }
+}
+
+juce::StringArray MainComponent::Menu::getMenuBarNames()
+{
+    return { "File", "Edit", "View", "Device" };
+}
+
+juce::PopupMenu MainComponent::Menu::getMenuForIndex(int index, const juce::String&)
+{
+    auto& manager = main.commandManager;
+    juce::PopupMenu popup;
+    switch (index)
+    {
+        case 0:
+            popup.addCommandItem(&manager, exportProfileCommand);
+            popup.addCommandItem(&manager, copyProfileCommand);
+            popup.addSeparator();
+            popup.addCommandItem(&manager, exportImageCommand);
+            break;
+        case 1:
+            popup.addCommandItem(&manager, undoCommand);
+            popup.addCommandItem(&manager, redoCommand);
+            popup.addSeparator();
+            popup.addCommandItem(&manager, revertControlCommand);
+            popup.addCommandItem(&manager, revertAllCommand);
+            break;
+        case 2:
+            popup.addCommandItem(&manager, showCcUserCommand);
+            popup.addCommandItem(&manager, showDawCommand);
+            popup.addSeparator();
+            popup.addCommandItem(&manager, toggleDiagnosticsCommand);
+            break;
+        case 3:
+            popup.addCommandItem(&manager, useUsbCommand);
+            popup.addCommandItem(&manager, useBluetoothCommand);
+            popup.addSeparator();
+            popup.addCommandItem(&manager, refreshCommand);
+            popup.addCommandItem(&manager, readSettingsCommand);
+            popup.addCommandItem(&manager, writeCommand);
+            break;
+        default:
+            break;
+    }
+    return popup;
 }
 
 void MainComponent::paint(juce::Graphics& graphics)
 {
-    graphics.fillAll(mixerui::shell);
-    graphics.setColour(mixerui::plate);
-    graphics.fillRect(0, 0, getWidth(), 108);
-    graphics.setColour(mixerui::hairline);
-    graphics.fillRect(0, 108, getWidth(), 1);
+    graphics.fillAll(mixerui::window);
 }
 
 void MainComponent::resized()
 {
-    titleLabel.setBounds(24, 14, 240, 28);
-    versionLabel.setBounds(268, 20, 250, 18);
-    subtitleLabel.setBounds(24, 42, 460, 18);
-    statusLabel.setBounds(getWidth() - 560, 14, 400, 24);
-    detailLabel.setBounds(getWidth() - 560, 40, 400, 18);
-    refreshButton.setBounds(getWidth() - 128, 18, 104, 34);
-
-    gearButton.setBounds(24, 70, 28, 28);
-    bluetoothButton.setBounds(getWidth() - 128, 68, 104, 32);
-    usbButton.setBounds(getWidth() - 220, 68, 86, 32);
-    connectionCaption.setBounds(getWidth() - 318, 68, 90, 32);
-    queryProgress.setBounds(0, 108, getWidth(), 3);
-
-    overview.setBounds(0, 109, getWidth(), getHeight() - 109);
-    diagnostics.setBounds(0, 109, getWidth(), getHeight() - 109);
+    auto area = getLocalBounds();
+    headerBar.setBounds(area.removeFromTop(HeaderComponent::preferredHeight));
+    overviewView.setBounds(area);
+    diagnosticsView.setBounds(area);
+    if (toastView.isVisible())
+        toastView.setBounds(toastView.preferredBounds(getLocalBounds()));
 }

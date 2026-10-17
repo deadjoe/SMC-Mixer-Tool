@@ -4,20 +4,19 @@
 #include <cctype>
 #include <iomanip>
 #include <sstream>
-#include <stdexcept>
 
 namespace
 {
-int read24(const Bytes& bytes, std::size_t offset)
-{
-    return static_cast<int>(bytes[offset])
-         | (static_cast<int>(bytes[offset + 1]) << 8)
-         | (static_cast<int>(bytes[offset + 2]) << 16);
-}
-
 std::string byteLabel(std::uint8_t value)
 {
     return VendorProtocol::hexString(Bytes { value });
+}
+
+std::string versionLabel(int number)
+{
+    std::ostringstream label;
+    label << 'V' << std::setw(3) << std::setfill('0') << number;
+    return label.str();
 }
 
 std::string trim(std::string value)
@@ -94,44 +93,88 @@ Bytes VendorProtocol::versionQueryPayload()
     return { 0x00, 0x59, 0x11, 0x00, 0x00, 0x00, 0xff };
 }
 
-Bytes VendorProtocol::versionQuerySysEx()
+Bytes VendorProtocol::frame(std::uint8_t command, const Bytes& body)
+{
+    Bytes payload { 0x00, 0x59, command };
+    appendLE(payload, static_cast<std::uint32_t>(body.size()), 3);
+    payload.insert(payload.end(), body.begin(), body.end());
+    payload.push_back(checksum(body));
+    return payload;
+}
+
+std::optional<VendorFrame> VendorProtocol::parseFrame(const Bytes& payload)
+{
+    if (payload.size() < headerSize + 1 || payload[0] != 0x00 || payload[1] != 0x59)
+        return std::nullopt;
+
+    const auto length = static_cast<std::size_t>(readLE(payload, 3, 3));
+    if (payload.size() != headerSize + length + 1)
+        throw ProtocolError("Vendor reply length does not match its payload");
+
+    VendorFrame result;
+    result.command = payload[2];
+    result.body.assign(payload.begin() + static_cast<std::ptrdiff_t>(headerSize),
+                       payload.begin() + static_cast<std::ptrdiff_t>(headerSize + length));
+    const auto expected = checksum(result.body);
+    const auto actual = payload.back();
+    if (actual != expected)
+        throw ProtocolError("Vendor reply checksum mismatch: expected " + byteLabel(expected)
+                            + ", received " + byteLabel(actual));
+    return result;
+}
+
+Bytes VendorProtocol::sysEx(const Bytes& payload)
 {
     Bytes message { 0xf0 };
-    const auto encoded = encode8To7(versionQueryPayload());
+    const auto encoded = encode8To7(payload);
     message.insert(message.end(), encoded.begin(), encoded.end());
     message.push_back(0xf7);
     return message;
 }
 
-VersionInfo VendorProtocol::parseVersionResponse(const Bytes& message)
+std::optional<Bytes> VendorProtocol::unwrapSysEx(const Bytes& message)
 {
     if (message.size() < 3 || message.front() != 0xf0 || message.back() != 0xf7)
-        throw std::runtime_error("Version reply is not a complete F0...F7 SysEx message");
+        return std::nullopt;
+    return decode7To8(Bytes(message.begin() + 1, message.end() - 1));
+}
 
-    return parseVersionPayload(decode7To8(Bytes(message.begin() + 1, message.end() - 1)));
+std::vector<Bytes> VendorProtocol::vendorPayloads(const std::vector<Bytes>& messages)
+{
+    const auto isVendor = [](const Bytes& bytes) {
+        return bytes.size() > headerSize && bytes[0] == 0x00 && bytes[1] == 0x59;
+    };
+    std::vector<Bytes> payloads;
+    for (const auto& message : messages)
+    {
+        if (auto payload = unwrapSysEx(message); payload && isVendor(*payload))
+            payloads.push_back(std::move(*payload));
+        else if (isVendor(message))
+            payloads.push_back(message);
+    }
+    return payloads;
+}
+
+VersionInfo VendorProtocol::parseVersionResponse(const Bytes& message)
+{
+    const auto payload = unwrapSysEx(message);
+    if (!payload)
+        throw ProtocolError("Version reply is not a complete F0...F7 SysEx message");
+    return parseVersionPayload(*payload);
 }
 
 VersionInfo VendorProtocol::parseVersionPayload(const Bytes& payload)
 {
-    if (payload.size() < 7)
-        throw std::runtime_error("Vendor reply is shorter than its 7-byte header");
-    if (payload[0] != 0x00 || payload[1] != 0x59)
-        throw std::runtime_error("Vendor reply header does not match");
-    if (payload[2] != 0x11)
-        throw std::runtime_error("Version reply command does not match: " + byteLabel(payload[2]));
-
-    const auto dataLength = read24(payload, 3);
-    if (payload.size() != static_cast<std::size_t>(dataLength + 7))
-        throw std::runtime_error("Version reply length does not match its payload");
-    if (dataLength < 9)
-        throw std::runtime_error("Version reply data is too short");
-
-    const Bytes data(payload.begin() + 6, payload.begin() + 6 + dataLength);
-    const auto expectedChecksum = checksum(data);
-    const auto actualChecksum = payload[static_cast<std::size_t>(6 + dataLength)];
-    if (actualChecksum != expectedChecksum)
-        throw std::runtime_error("Checksum mismatch: expected " + byteLabel(expectedChecksum)
-                                 + ", received " + byteLabel(actualChecksum));
+    if (payload.size() < headerSize + 1)
+        throw ProtocolError("Vendor reply is shorter than its 7-byte header");
+    const auto parsed = parseFrame(payload);
+    if (!parsed)
+        throw ProtocolError("Vendor reply header does not match");
+    if (parsed->command != 0x11)
+        throw ProtocolError("Version reply command does not match: " + byteLabel(parsed->command));
+    const auto& data = parsed->body;
+    if (data.size() < 9)
+        throw ProtocolError("Version reply data is too short");
 
     const auto textEnd = std::find(data.begin(), data.end(), 0);
     const auto visibleText = trim(std::string(data.begin(), textEnd));
@@ -152,10 +195,7 @@ VersionInfo VendorProtocol::parseVersionPayload(const Bytes& payload)
             deviceName << components[index];
         }
         info.deviceName = deviceName.str();
-        std::ostringstream version;
-        version << 'V' << std::setw(3) << std::setfill('0') << info.versionNumber;
-        info.versionLabel = version.str();
-        info.versionDigitBytes = Bytes(components.back().begin(), components.back().end());
+        info.versionLabel = versionLabel(info.versionNumber);
         info.rawPayload = payload;
         return info;
     }
@@ -172,15 +212,12 @@ VersionInfo VendorProtocol::parseVersionPayload(const Bytes& payload)
         digits += std::to_string(static_cast<int>(byte));
     }
     if (digits.empty())
-        throw std::runtime_error("The reply passed its checksum, but it has no numeric version");
+        throw ProtocolError("The reply passed its checksum, but it has no numeric version");
 
     VersionInfo info;
     info.deviceName = visibleText;
     info.versionNumber = std::stoi(digits);
-    std::ostringstream version;
-    version << 'V' << std::setw(3) << std::setfill('0') << info.versionNumber;
-    info.versionLabel = version.str();
-    info.versionDigitBytes = versionBytes;
+    info.versionLabel = versionLabel(info.versionNumber);
     info.rawPayload = payload;
     return info;
 }
@@ -191,6 +228,20 @@ std::uint8_t VendorProtocol::checksum(const Bytes& body)
     for (const auto byte : body)
         sum = (sum + static_cast<int>(byte)) & 0xff;
     return static_cast<std::uint8_t>(~sum);
+}
+
+std::uint32_t VendorProtocol::readLE(const Bytes& bytes, std::size_t offset, std::size_t count)
+{
+    std::uint32_t value = 0;
+    for (std::size_t index = 0; index < count; ++index)
+        value |= static_cast<std::uint32_t>(bytes.at(offset + index)) << (8 * index);
+    return value;
+}
+
+void VendorProtocol::appendLE(Bytes& bytes, std::uint32_t value, std::size_t count)
+{
+    for (std::size_t index = 0; index < count; ++index)
+        bytes.push_back(static_cast<std::uint8_t>((value >> (8 * index)) & 0xff));
 }
 
 std::string VendorProtocol::hexString(const Bytes& bytes, std::size_t maximumCount)

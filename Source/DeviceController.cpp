@@ -12,28 +12,29 @@
 
 namespace
 {
+// A reply that cannot be parsed is not the one being waited for, so keep listening.
 bool chunkReady(const std::vector<Bytes>& messages, std::uint32_t address, std::uint32_t length)
 {
     try
     {
-        return SettingsProtocol::parseChunk(messages, address, length).size() == length;
+        return SettingsProtocol::findChunk(messages, address, length).has_value();
     }
-    catch (const std::exception&)
+    catch (const ProtocolError&)
     {
         return false;
     }
 }
 
+// A malformed acknowledgement ends the wait, so the writer can report it at once.
 bool acknowledgementReady(const std::vector<Bytes>& messages)
 {
     try
     {
-        SettingsProtocol::parseWriteAcknowledgement(messages);
-        return true;
+        return SettingsProtocol::acknowledgement(messages).state != WriteAcknowledgement::State::missing;
     }
-    catch (const std::exception& error)
+    catch (const ProtocolError&)
     {
-        return std::string(error.what()).find("No write acknowledgement") == std::string::npos;
+        return true;
     }
 }
 }
@@ -49,9 +50,9 @@ DeviceController::~DeviceController()
     shutdown();
 }
 
-bool DeviceController::requestRefresh(TransportKind transport)
+bool DeviceController::requestRefresh(TransportKind transport, bool thenReadSettings)
 {
-    return enqueue({ RequestKind::refresh, transport, {} });
+    return enqueue({ thenReadSettings ? RequestKind::refreshAndSettings : RequestKind::refresh, transport, {} });
 }
 
 bool DeviceController::requestSettings(TransportKind transport)
@@ -74,12 +75,6 @@ bool DeviceController::enqueue(Request request)
     }
     condition.notify_all();
     return true;
-}
-
-bool DeviceController::isBusy() const
-{
-    std::lock_guard<std::mutex> lock(mutex);
-    return active || !requests.empty();
 }
 
 std::vector<DeviceEvent> DeviceController::pollEvents()
@@ -115,18 +110,39 @@ void DeviceController::run()
             request = requests.front();
             requests.pop_front();
             active = true;
+            refreshSucceeded = false;
         }
 
+        std::string failure;
         try
         {
-            if (request.kind == RequestKind::refresh)
-                executeRefresh(request.transport);
-            else if (request.kind == RequestKind::settings)
-                executeSettings(request.transport);
-            else
-                executeWrite(request.transport, request.spans);
+            switch (request.kind)
+            {
+                case RequestKind::refresh:
+                    executeRefresh(request.transport);
+                    break;
+                case RequestKind::refreshAndSettings:
+                    executeRefresh(request.transport);
+                    executeSettings(request.transport);
+                    break;
+                case RequestKind::settings:
+                    executeSettings(request.transport);
+                    break;
+                case RequestKind::write:
+                    executeWrite(request.transport, request.spans);
+                    break;
+            }
         }
         catch (const std::exception& error)
+        {
+            failure = error.what();
+        }
+        catch (...)
+        {
+            failure = "Unexpected device communication error";
+        }
+
+        if (!failure.empty())
         {
             // A USB-C port that timed out may be stale after a replug or power cycle. Reopen it next time.
             if (request.transport == TransportKind::usbC)
@@ -136,24 +152,11 @@ void DeviceController::run()
                 DeviceEvent event;
                 event.kind = DeviceEvent::Kind::operationFailed;
                 event.transport = request.transport;
-                event.settingsOperation = request.kind != RequestKind::refresh;
+                // A refresh that already reported the device failed while reading its settings.
+                event.settingsOperation = request.kind != RequestKind::refresh
+                                       && !(request.kind == RequestKind::refreshAndSettings && !refreshSucceeded);
                 event.writeOperation = request.kind == RequestKind::write;
-                event.message = error.what();
-                emit(std::move(event));
-            }
-        }
-        catch (...)
-        {
-            if (request.transport == TransportKind::usbC)
-                midi.close();
-            if (!threadShouldExit() && !stop.load())
-            {
-                DeviceEvent event;
-                event.kind = DeviceEvent::Kind::operationFailed;
-                event.transport = request.transport;
-                event.settingsOperation = request.kind != RequestKind::refresh;
-                event.writeOperation = request.kind == RequestKind::write;
-                event.message = "Unexpected device communication error";
+                event.message = failure;
                 emit(std::move(event));
             }
         }
@@ -187,8 +190,9 @@ void DeviceController::executeRefresh(TransportKind transport)
     {
         // Refresh always finds the ports again, so a power-cycled mixer gets fresh endpoints.
         midi.close();
-        snapshot.rawSysEx = midi.query(transport, VendorProtocol::versionQuerySysEx(), std::chrono::milliseconds { 2000 }, &stop);
-        snapshot.version = VendorProtocol::parseVersionResponse(snapshot.rawSysEx);
+        const auto reply = midi.query(transport, VendorProtocol::sysEx(VendorProtocol::versionQueryPayload()),
+                                      std::chrono::milliseconds { 2000 }, &stop);
+        snapshot.version = VendorProtocol::parseVersionResponse(reply);
         snapshot.sourceName = midi.connectedSourceName();
         snapshot.destinationName = midi.connectedDestinationName();
     }
@@ -212,12 +216,13 @@ void DeviceController::executeRefresh(TransportKind transport)
     event.transport = transport;
     event.snapshot = std::move(snapshot);
     emit(std::move(event));
+    refreshSucceeded = true;
 }
 
 void DeviceController::executeSettings(TransportKind transport)
 {
-    constexpr std::uint32_t totalLength = 6282;
-    constexpr std::uint32_t chunkSize = 1009;
+    constexpr auto totalLength = static_cast<std::uint32_t>(layout::snapshotSize);
+    constexpr auto chunkSize = layout::readChunkSize;
     std::vector<Bytes> responses;
 
     for (std::uint32_t address = 0; address < totalLength; address += chunkSize)
@@ -236,7 +241,7 @@ void DeviceController::executeSettings(TransportKind transport)
         if (transport == TransportKind::usbC)
         {
             auto part = midi.sendAndCapture(transport,
-                                             SettingsProtocol::readSysEx(5, address, length),
+                                             VendorProtocol::sysEx(SettingsProtocol::readPayload(address, length)),
                                              std::chrono::milliseconds { 2000 },
                                              &stop,
                                              [&](const std::vector<Bytes>& messages) {
@@ -248,19 +253,17 @@ void DeviceController::executeSettings(TransportKind transport)
         }
         else
         {
-            responses.push_back(BleTransport::queryVendor(SettingsProtocol::readPayload(5, address, length), 3.0, &stop));
+            responses.push_back(BleTransport::queryVendor(SettingsProtocol::readPayload(address, length), 3.0, &stop));
         }
     }
 
     if (threadShouldExit() || stop.load())
         return;
 
-    auto result = transport == TransportKind::usbC
-        ? SettingsProtocol::parseResponses(responses)
-        : SettingsProtocol::parsePayloads(responses);
+    auto result = SettingsProtocol::parseResponses(responses);
     result.transport = transport;
     if (result.data.size() != totalLength)
-        throw std::runtime_error("Settings snapshot should be 6282 bytes, received "
+        throw std::runtime_error("Settings snapshot should be " + std::to_string(totalLength) + " bytes, received "
                                  + std::to_string(result.data.size()));
 
     DeviceEvent progressEvent;
@@ -287,7 +290,7 @@ std::vector<Bytes> DeviceController::exchange(TransportKind transport,
     // Both links carry the same vendor payload. USB-C frames it as SysEx on the open
     // Private port and returns once the expected reply is in. Bluetooth sends it once on AE41.
     if (transport == TransportKind::usbC)
-        return midi.sendAndCapture(transport, SettingsProtocol::sysEx(payload), usbWindow, &stop, ready);
+        return midi.sendAndCapture(transport, VendorProtocol::sysEx(payload), usbWindow, &stop, ready);
 
     return { BleTransport::queryVendor(payload, bluetoothTimeoutSeconds, &stop) };
 }

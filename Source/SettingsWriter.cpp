@@ -1,7 +1,8 @@
 #include "SettingsWriter.h"
 
-#include "ControlConfiguration.h"
+#include "SettingsLayout.h"
 #include "SettingsProtocol.h"
+#include "VendorProtocol.h"
 
 #include <set>
 #include <stdexcept>
@@ -12,9 +13,9 @@ namespace
 const std::string unsavedAdvice
     = " Nothing was saved. Write again to retry, or switch the mixer off and on to discard what reached it.";
 
-bool rejected(const std::string& message)
+std::string statusText(const WriteAcknowledgement& reply)
 {
-    return message.find("rejected the write") != std::string::npos;
+    return "the mixer rejected it, status " + VendorProtocol::hexString(Bytes { reply.status });
 }
 
 std::string at(std::uint32_t address)
@@ -82,8 +83,9 @@ std::optional<std::vector<SettingsSpan>> SettingsWriter::write(const std::vector
         const auto length = static_cast<std::uint32_t>(span.data.size());
 
         // A lost acknowledgement is retried once. Writing the same bytes twice is harmless.
+        // A rejection is final.
         report();
-        std::string writeError = "No write acknowledgement was received";
+        std::string writeError = "no write acknowledgement was received";
         bool acknowledged = false;
         for (int attempt = 0; attempt < 2 && !acknowledged; ++attempt)
         {
@@ -91,15 +93,18 @@ std::optional<std::vector<SettingsSpan>> SettingsWriter::write(const std::vector
                 return std::nullopt;
             try
             {
-                SettingsProtocol::parseWriteAcknowledgement(
+                const auto reply = SettingsProtocol::acknowledgement(
                     exchange({ Step::write, SettingsProtocol::writePayload(span.address, span.data), span.address, length }));
-                acknowledged = true;
+                if (reply.state == WriteAcknowledgement::State::rejected)
+                {
+                    writeError = statusText(reply);
+                    break;
+                }
+                acknowledged = reply.state == WriteAcknowledgement::State::accepted;
             }
             catch (const std::exception& error)
             {
                 writeError = error.what();
-                if (rejected(writeError))
-                    break;
             }
         }
         if (!acknowledged)
@@ -109,15 +114,15 @@ std::optional<std::vector<SettingsSpan>> SettingsWriter::write(const std::vector
 
         report();
         std::optional<Bytes> readBack;
-        std::string readError = "No read-back data was received";
+        std::string readError = "no read-back data was received";
         for (int attempt = 0; attempt < 2 && !readBack; ++attempt)
         {
             if (stopped())
                 return std::nullopt;
             try
             {
-                readBack = SettingsProtocol::parseChunk(
-                    exchange({ Step::readBack, SettingsProtocol::readPayload(5, span.address, length), span.address, length }),
+                readBack = SettingsProtocol::findChunk(
+                    exchange({ Step::readBack, SettingsProtocol::readPayload(span.address, length), span.address, length }),
                     span.address,
                     length);
             }
@@ -135,24 +140,26 @@ std::optional<std::vector<SettingsSpan>> SettingsWriter::write(const std::vector
     }
 
     report();
-    std::string saveError = "No save acknowledgement was received";
+    std::string saveError = "no save acknowledgement was received";
     bool saved = false;
     for (int attempt = 0; attempt < 2 && !saved; ++attempt)
     {
         if (stopped())
             return std::nullopt;
+        WriteAcknowledgement reply;
         try
         {
-            SettingsProtocol::parseWriteAcknowledgement(exchange({ Step::save, SettingsProtocol::savePayload(), 0, 0 }));
-            saved = true;
+            reply = SettingsProtocol::acknowledgement(exchange({ Step::save, SettingsProtocol::savePayload(), 0, 0 }));
         }
         catch (const std::exception& error)
         {
             saveError = error.what();
-            if (rejected(saveError))
-                throw std::runtime_error("The mixer took the records but refused to save them."
-                                         " Switch it off and on to discard them, then write again.");
+            continue;
         }
+        if (reply.state == WriteAcknowledgement::State::rejected)
+            throw std::runtime_error("The mixer took the records but refused to save them."
+                                     " Switch it off and on to discard them, then write again.");
+        saved = reply.state == WriteAcknowledgement::State::accepted;
     }
     if (!saved)
         throw std::runtime_error("The records reached the mixer, but the save was not confirmed: " + saveError

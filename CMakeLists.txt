@@ -50,13 +50,14 @@ juce_add_gui_app(SMCMixerGUI
 
 juce_generate_juce_header(SMCMixerGUI)
 
-target_sources(SMCMixerGUI PRIVATE
-    Source/Main.cpp
+# Everything but the application entry point. The UI tests build the same sources.
+set(SMC_APP_SOURCES
     Source/MainComponent.h
     Source/MainComponent.cpp
     Source/DeviceModel.h
     Source/DeviceController.h
     Source/DeviceController.cpp
+    Source/SettingsLayout.h
     Source/VendorProtocol.h
     Source/VendorProtocol.cpp
     Source/SettingsProtocol.h
@@ -69,12 +70,18 @@ target_sources(SMCMixerGUI PRIVATE
     Source/BleTransport.mm
     Source/ControlConfiguration.h
     Source/ControlConfiguration.cpp
+    Source/ControlDescription.h
+    Source/ControlDescription.cpp
     Source/SettingsDocument.h
     Source/SettingsDocument.cpp
-    Source/UI/ControlInspectorComponent.h
-    Source/UI/ControlInspectorComponent.cpp
     Source/UI/MixerLookAndFeel.h
     Source/UI/MixerLookAndFeel.cpp
+    Source/UI/Widgets.h
+    Source/UI/Widgets.cpp
+    Source/UI/HeaderComponent.h
+    Source/UI/HeaderComponent.cpp
+    Source/UI/ControlInspectorComponent.h
+    Source/UI/ControlInspectorComponent.cpp
     Source/UI/DeviceDiagramComponent.h
     Source/UI/DeviceDiagramComponent.cpp
     Source/UI/DeviceOverviewComponent.h
@@ -83,12 +90,17 @@ target_sources(SMCMixerGUI PRIVATE
     Source/UI/DiagnosticsComponent.cpp
 )
 
+target_sources(SMCMixerGUI PRIVATE Source/Main.cpp ${SMC_APP_SOURCES})
+
 set_source_files_properties(Source/BleTransport.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
 
-target_compile_definitions(SMCMixerGUI PRIVATE
+set(SMC_JUCE_DEFINITIONS
     DONT_SET_USING_JUCE_NAMESPACE=1
     JUCE_WEB_BROWSER=0
     JUCE_USE_CURL=0
+)
+target_compile_definitions(SMCMixerGUI PRIVATE
+    ${SMC_JUCE_DEFINITIONS}
     JUCE_APPLICATION_NAME_STRING="$<TARGET_PROPERTY:SMCMixerGUI,JUCE_PRODUCT_NAME>"
     JUCE_APPLICATION_VERSION_STRING="$<TARGET_PROPERTY:SMCMixerGUI,JUCE_VERSION>"
 )
@@ -97,12 +109,12 @@ find_library(CORE_MIDI_FRAMEWORK CoreMIDI REQUIRED)
 find_library(CORE_BLUETOOTH_FRAMEWORK CoreBluetooth REQUIRED)
 find_library(FOUNDATION_FRAMEWORK Foundation REQUIRED)
 
+set(SMC_PLATFORM_LIBRARIES ${CORE_MIDI_FRAMEWORK} ${CORE_BLUETOOTH_FRAMEWORK} ${FOUNDATION_FRAMEWORK})
+
 target_link_libraries(SMCMixerGUI PRIVATE
     juce::juce_gui_extra
     juce::juce_recommended_warning_flags
-    ${CORE_MIDI_FRAMEWORK}
-    ${CORE_BLUETOOTH_FRAMEWORK}
-    ${FOUNDATION_FRAMEWORK}
+    ${SMC_PLATFORM_LIBRARIES}
 )
 
 target_include_directories(SMCMixerGUI PRIVATE "${CMAKE_BINARY_DIR}/generated")
@@ -121,8 +133,24 @@ add_executable(SMCMixerCoreTests
     Source/SettingsProtocol.cpp
     Source/SettingsWriter.cpp
     Source/ControlConfiguration.cpp
+    Source/ControlDescription.cpp
     Source/SettingsDocument.cpp
 )
 target_include_directories(SMCMixerCoreTests PRIVATE Source)
 target_compile_features(SMCMixerCoreTests PRIVATE cxx_std_17)
 target_compile_options(SMCMixerCoreTests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+
+# The UI tests build the app's components headless: layout at the smallest window size,
+# drawing, the quit and status flows, and the editors. --render <folder> also saves
+# screenshots of each state for review.
+juce_add_console_app(SMCMixerUITests PRODUCT_NAME "SMCMixerUITests")
+juce_generate_juce_header(SMCMixerUITests)
+target_sources(SMCMixerUITests PRIVATE tests/ui_tests.cpp ${SMC_APP_SOURCES})
+target_compile_definitions(SMCMixerUITests PRIVATE ${SMC_JUCE_DEFINITIONS})
+target_include_directories(SMCMixerUITests PRIVATE Source "${CMAKE_BINARY_DIR}/generated")
+target_link_libraries(SMCMixerUITests PRIVATE
+    juce::juce_gui_extra
+    juce::juce_recommended_warning_flags
+    ${SMC_PLATFORM_LIBRARIES}
+)
+add_dependencies(SMCMixerUITests SMCBuildInfo)

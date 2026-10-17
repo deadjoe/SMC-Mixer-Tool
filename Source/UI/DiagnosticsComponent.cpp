@@ -1,8 +1,9 @@
 #include "DiagnosticsComponent.h"
 
 #include "../CoreMidiTransport.h"
+#include "../SettingsLayout.h"
 #include "../VendorProtocol.h"
-#include "MixerLookAndFeel.h"
+#include "BuildInfo.h"
 
 namespace
 {
@@ -43,7 +44,6 @@ juce::String serviceLabel(const std::string& uuid)
 }
 
 DiagnosticsComponent::DiagnosticsComponent()
-    : progressBar(progressValue)
 {
     reportEditor.setMultiLine(true);
     reportEditor.setReadOnly(true);
@@ -51,40 +51,35 @@ DiagnosticsComponent::DiagnosticsComponent()
     reportEditor.setCaretVisible(false);
     reportEditor.setPopupMenuEnabled(true);
     reportEditor.setColour(juce::TextEditor::textColourId, mixerui::ink);
-    reportEditor.setColour(juce::TextEditor::backgroundColourId, mixerui::plate);
+    reportEditor.setColour(juce::TextEditor::backgroundColourId, mixerui::surface);
     reportEditor.setColour(juce::TextEditor::outlineColourId, juce::Colours::transparentBlack);
-    reportEditor.setColour(juce::TextEditor::highlightColourId, mixerui::knob.withAlpha(0.35f));
-    reportEditor.setFont(juce::Font(juce::FontOptions(juce::Font::getDefaultMonospacedFontName(),
-                                                      13.0f,
-                                                      juce::Font::plain)));
+    reportEditor.setColour(juce::TextEditor::focusedOutlineColourId, juce::Colours::transparentBlack);
+    reportEditor.setFont(juce::Font(juce::FontOptions(juce::Font::getDefaultMonospacedFontName(), 12.0f, juce::Font::plain)
+                                        .withPointHeight(11.5f)));
+    reportEditor.setLineSpacing(1.25f);
     addAndMakeVisible(reportEditor);
+
+    titleLabel.setText("Diagnostics", juce::dontSendNotification);
+    titleLabel.setFont(mixerui::font(17.0f, mixerui::Weight::semibold));
+    versionLabel.setText("SMC Mixer Tool " + juce::String(kSmcVersion), juce::dontSendNotification);
+    versionLabel.setFont(mixerui::font(11.0f));
+    versionLabel.setColour(juce::Label::textColourId, mixerui::muted);
+    versionLabel.setTooltip("Version and the git commit of this build. .dirty marks a build with uncommitted changes.");
+    for (auto* label : { &titleLabel, &versionLabel })
+    {
+        label->setBorderSize({});
+        addAndMakeVisible(*label);
+    }
 
     addAndMakeVisible(readButton);
     addAndMakeVisible(exportButton);
     readButton.onClick = [this] { if (onReadSettings) onReadSettings(); };
     exportButton.onClick = [this] { exportSettings(); };
-    readButton.setTooltip("Read the 6,282-byte settings image from the selected link.");
-    exportButton.setTooltip("Save the settings image. It contains the DAW and CC / User profiles.");
-    readButton.setColour(juce::TextButton::buttonColourId, mixerui::keyDown);
-    readButton.setColour(juce::TextButton::textColourOffId, mixerui::onShell);
-    exportButton.setColour(juce::TextButton::buttonColourId, mixerui::keyIdle);
-    exportButton.setColour(juce::TextButton::textColourOffId, mixerui::ink);
-
-    for (auto* label : { &statusLabel, &settingsSummary })
-    {
-        label->setFont(MixerLookAndFeel::font(12.0f));
-        label->setMinimumHorizontalScale(0.6f);
-        addAndMakeVisible(*label);
-    }
-    statusLabel.setColour(juce::Label::textColourId, mixerui::muted);
-
-    progressBar.setPercentageDisplay(false);
-    progressBar.setColour(juce::ProgressBar::foregroundColourId, mixerui::knobOutline);
-    addAndMakeVisible(progressBar);
-    progressBar.setVisible(false);
+    readButton.setTooltip("Read the 6,282-byte settings image over the selected link.");
+    exportButton.setTooltip("Save the settings image. It holds the DAW and CC / User profiles.");
 
     render();
-    statusLabel.setText("Ready", juce::dontSendNotification);
+    updateEnabledState();
 }
 
 void DiagnosticsComponent::setActiveTransport(TransportKind transport)
@@ -117,8 +112,7 @@ void DiagnosticsComponent::setSettings(const SettingsReadResult& result)
 {
     settings = result;
     settingsFromRead = true;
-    statusLabel.setColour(juce::Label::textColourId, mixerui::success);
-    statusLabel.setText("Settings snapshot complete. Export is ready.", juce::dontSendNotification);
+    lastError.clear();
     render();
     updateEnabledState();
 }
@@ -137,8 +131,7 @@ void DiagnosticsComponent::adoptWorkingImage(const Bytes& image)
         settings->data = image;
     }
     settingsFromRead = false;
-    statusLabel.setColour(juce::Label::textColourId, mixerui::success);
-    statusLabel.setText("Write verified and saved. Export uses this image.", juce::dontSendNotification);
+    lastError.clear();
     render();
     updateEnabledState();
 }
@@ -234,11 +227,11 @@ juce::String DiagnosticsComponent::linkReport() const
     text += "\nSettings image\n";
     if (!settings)
     {
-        text += "  Not loaded. Read snapshot stores both profiles in one 6,282-byte image.\n";
+        text += "  Not loaded. Read settings stores both profiles in one 6,282-byte image.\n";
     }
     else
     {
-        const auto expected = settings->data.size() == 6282;
+        const auto expected = settings->data.size() == layout::snapshotSize;
         const auto link = linkName(settings->transport);
         text += "  " + juce::String(static_cast<int>(settings->data.size())) + " bytes";
         text += expected ? ", both profiles are present.\n" : ", expected 6,282 bytes.\n";
@@ -259,54 +252,27 @@ juce::String DiagnosticsComponent::linkReport() const
         }
         text += "  Prefix: " + mixerui::utf8(VendorProtocol::hexString(settings->data, 24)) + "\n";
     }
+
+    if (lastError.isNotEmpty())
+        text += "\nLast error\n  " + lastError.replace("\n", "\n  ") + "\n";
     return text;
 }
 
 void DiagnosticsComponent::render()
 {
     reportEditor.setText(linkReport());
-    if (settings)
-        settingsSummary.setText(juce::String(static_cast<int>(settings->data.size()))
-                                    + " bytes ready to export",
-                                juce::dontSendNotification);
-    else
-        settingsSummary.setText("Export is available after the snapshot is read", juce::dontSendNotification);
 }
 
-void DiagnosticsComponent::setBusy(bool busy, double progress, bool settingsOperation)
+void DiagnosticsComponent::setBusy(bool busy)
 {
     controlsBusy = busy;
-    readingSettings = busy && settingsOperation;
-    progressValue = juce::jlimit(0.0, 1.0, progress);
-    progressBar.setVisible(readingSettings);
-    progressBar.repaint();
-
-    if (readingSettings)
-    {
-        statusLabel.setColour(juce::Label::textColourId, mixerui::ink);
-        statusLabel.setText("Reading settings snapshot... "
-                                + juce::String(juce::roundToInt(progressValue * 100.0)) + "%",
-                            juce::dontSendNotification);
-    }
-    else if (busy)
-    {
-        statusLabel.setColour(juce::Label::textColourId, mixerui::muted);
-        statusLabel.setText("Reading device information...", juce::dontSendNotification);
-    }
-    else if (statusLabel.getText() == "Reading device information..."
-             || statusLabel.getText().startsWith("Reading settings"))
-    {
-        statusLabel.setColour(juce::Label::textColourId, mixerui::muted);
-        statusLabel.setText("Ready", juce::dontSendNotification);
-    }
     updateEnabledState();
 }
 
-void DiagnosticsComponent::setError(const juce::String& message)
+void DiagnosticsComponent::setLastError(const juce::String& message)
 {
-    statusLabel.setColour(juce::Label::textColourId, mixerui::error);
-    statusLabel.setText(message, juce::dontSendNotification);
-    statusLabel.setTooltip(message);
+    lastError = message;
+    render();
 }
 
 void DiagnosticsComponent::updateEnabledState()
@@ -335,46 +301,31 @@ void DiagnosticsComponent::exportSettings()
                                  if (file == juce::File() || !safe->settings)
                                      return;
 
-                                 if (file.replaceWithData(safe->settings->data.data(), safe->settings->data.size()))
-                                 {
-                                     safe->statusLabel.setColour(juce::Label::textColourId, mixerui::success);
-                                     safe->statusLabel.setText("Exported: " + file.getFullPathName(),
-                                                               juce::dontSendNotification);
-                                     safe->statusLabel.setTooltip(file.getFullPathName());
-                                 }
-                                 else
-                                 {
-                                     safe->setError("Could not write the file. Check the location and permissions.");
-                                 }
+                                 const auto saved = file.replaceWithData(safe->settings->data.data(), safe->settings->data.size());
+                                 if (safe->onNotice)
+                                     safe->onNotice(saved ? "Saved the settings image to " + file.getFileName() + "."
+                                                          : juce::String("Could not write the file. Check the location and permissions."),
+                                                    saved ? mixerui::Tone::success : mixerui::Tone::error);
                              });
 }
 
 void DiagnosticsComponent::paint(juce::Graphics& graphics)
 {
-    mixerui::paintPlate(graphics, reportCard);
-    mixerui::paintPlate(graphics, settingsCard);
-
-    graphics.setColour(mixerui::muted);
-    graphics.setFont(MixerLookAndFeel::font(10.0f, true));
-    graphics.drawText("LINK", reportCard.withHeight(34).reduced(16, 0),
-                      juce::Justification::centredLeft, false);
-    graphics.drawText("SNAPSHOT", settingsCard.withHeight(34).reduced(16, 0),
-                      juce::Justification::centredLeft, false);
+    mixerui::paintCard(graphics, reportCard.toFloat());
+    graphics.setColour(mixerui::hairline);
+    graphics.fillRect(reportCard.getX() + 1, reportCard.getY() + 64, reportCard.getWidth() - 2, 1);
 }
 
 void DiagnosticsComponent::resized()
 {
-    auto area = getLocalBounds().reduced(20);
-    settingsCard = area.removeFromBottom(118);
-    area.removeFromBottom(14);
-    reportCard = area;
-
-    reportEditor.setBounds(reportCard.reduced(16).withTrimmedTop(28).withTrimmedBottom(8));
-
-    auto settingsArea = settingsCard.reduced(16, 0);
-    readButton.setBounds(settingsArea.getRight() - 292, settingsArea.getY() + 9, 140, 34);
-    exportButton.setBounds(settingsArea.getRight() - 140, settingsArea.getY() + 9, 124, 34);
-    statusLabel.setBounds(settingsArea.getX(), settingsArea.getY() + 52, settingsArea.getWidth(), 22);
-    progressBar.setBounds(settingsArea.getX(), settingsArea.getY() + 78, settingsArea.getWidth(), 8);
-    settingsSummary.setBounds(settingsArea.getX(), settingsArea.getY() + 90, settingsArea.getWidth() - 300, 20);
+    reportCard = getLocalBounds().reduced(16, 14);
+    auto header = reportCard.reduced(20, 0).withHeight(64);
+    exportButton.setBounds(header.removeFromRight(124).withSizeKeepingCentre(124, 32));
+    header.removeFromRight(8);
+    readButton.setBounds(header.removeFromRight(116).withSizeKeepingCentre(116, 32));
+    header.removeFromRight(16);
+    auto titles = header.withSizeKeepingCentre(header.getWidth(), 40);
+    titleLabel.setBounds(titles.removeFromTop(22));
+    versionLabel.setBounds(titles);
+    reportEditor.setBounds(reportCard.withTrimmedTop(65).reduced(20, 12));
 }

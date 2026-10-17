@@ -41,10 +41,10 @@ public:
     DeviceController();
     ~DeviceController() override;
 
-    bool requestRefresh(TransportKind transport);
+    // Reads the identity, then, when asked, the settings image in the same request.
+    bool requestRefresh(TransportKind transport, bool thenReadSettings = false);
     bool requestSettings(TransportKind transport);
     bool requestWrite(TransportKind transport, std::vector<SettingsSpan> spans);
-    bool isBusy() const;
     std::vector<DeviceEvent> pollEvents();
     void shutdown();
 
@@ -52,6 +52,7 @@ private:
     enum class RequestKind
     {
         refresh,
+        refreshAndSettings,
         settings,
         write
     };
@@ -82,5 +83,6 @@ private:
     std::vector<DeviceEvent> events;
     bool active = false;
     bool quitting = false;
+    bool refreshSucceeded = false; // worker thread only
     CoreMidiTransport midi;
 };

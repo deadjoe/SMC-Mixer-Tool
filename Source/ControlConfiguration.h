@@ -1,10 +1,12 @@
 #pragma once
 
 #include "DeviceModel.h"
+#include "SettingsLayout.h"
 
 #include <array>
 #include <cstddef>
 #include <string>
+#include <vector>
 
 enum class DeviceProfile
 {
@@ -25,20 +27,6 @@ enum class EditableField
     led
 };
 
-namespace layout
-{
-constexpr std::size_t profileSize = 3141;
-constexpr std::size_t buttonCount = 43;
-constexpr std::size_t buttonSize = 71;
-constexpr std::size_t knobCount = 8;
-constexpr std::size_t knobSize = 6;
-constexpr std::size_t sliderCount = 8;
-constexpr std::size_t sliderSize = 5;
-constexpr std::size_t knobsOffset = buttonCount * buttonSize;
-constexpr std::size_t slidersOffset = knobsOffset + knobCount * knobSize;
-constexpr std::size_t snapshotSize = profileSize * 2;
-}
-
 enum class ControlKind
 {
     knob,
@@ -56,7 +44,16 @@ struct ControlSelection
     {
         return kind == other.kind && index == other.index;
     }
+    bool operator!=(const ControlSelection& other) const { return !(*this == other); }
 };
+
+bool isButton(ControlKind kind);
+// Whether the index names a control of that kind.
+bool isValidControl(ControlSelection selection);
+// The position of a track or global button among the 43 button records.
+std::size_t buttonRecordIndex(ControlSelection selection);
+// Every control in record order: knobs, faders, track buttons, global buttons.
+const std::vector<ControlSelection>& allControls();
 
 struct KnobConfiguration
 {
@@ -90,14 +87,33 @@ struct ButtonConfiguration
 
 struct ControlProfile
 {
-    std::array<KnobConfiguration, 8> knobs;
-    std::array<SliderConfiguration, 8> sliders;
-    std::array<ButtonConfiguration, 43> buttons;
+    std::array<KnobConfiguration, layout::knobCount> knobs;
+    std::array<SliderConfiguration, layout::sliderCount> sliders;
+    std::array<ButtonConfiguration, layout::buttonCount> buttons;
+
+    const ButtonConfiguration& button(ControlSelection selection) const { return buttons[buttonRecordIndex(selection)]; }
 };
+
+struct FieldRange
+{
+    int minimum = 0;
+    int maximum = 0;
+
+    bool contains(int value) const { return value >= minimum && value <= maximum; }
+};
+
+bool hasField(ControlKind kind, EditableField field);
+// The values a field can hold at all: channel 0-15, MIDI data 0-127, and so on.
+FieldRange fieldLimits(ControlKind kind, EditableField field);
+std::uint8_t fieldValue(const ControlProfile& profile, ControlSelection selection, EditableField field);
+// The values a field may take now. Min stays at or below Max, except on a relative knob,
+// whose Min and Max are two values to send rather than a range.
+FieldRange allowedRange(const ControlProfile& profile, ControlSelection selection, EditableField field);
+bool isRelativeKnob(const ControlProfile& profile, ControlSelection selection);
 
 struct ControlConfiguration
 {
-    std::array<ControlProfile, 2> profiles;
+    std::array<ControlProfile, layout::profileCount> profiles;
 
     static ControlConfiguration parse(const Bytes& data);
     const ControlProfile& profile(DeviceProfile profile) const;
@@ -107,6 +123,10 @@ struct ControlConfiguration
 // Knob type 3 is relative (Midi Suite calls it CW): Min and Max are the values sent
 // per counter-clockwise and clockwise step.
 constexpr std::uint8_t knobTypeRelative = 3;
+constexpr std::uint8_t knobTypeCount = 4;
+constexpr std::uint8_t sliderTypeCount = 3;
+constexpr std::uint8_t buttonModeCount = 6;
+constexpr std::uint8_t buttonModeCustom = 4;
 
 const char* knobTypeName(std::uint8_t type);
 const char* sliderTypeName(std::uint8_t type);
@@ -114,6 +134,7 @@ const char* buttonModeName(std::uint8_t mode);
 // The MIDI 1.0 name of a control change number, or "Undefined".
 const char* controlChangeName(std::uint8_t cc);
 
+std::string profileName(DeviceProfile profile);
 std::string controlDisplayName(ControlSelection selection);
 std::string trackButtonShortName(int buttonIndex);
 std::string trackButtonFullName(int buttonIndex);
