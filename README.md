@@ -6,7 +6,7 @@ macOS app for the M-VAVE SMC-Mixer ([Wireless DAW Control Surface](https://www.m
 
 ## Download
 
-[SMC Mixer Tool 1.2.0](https://github.com/deadjoe/SMC-Mixer-Tool/releases/tag/v1.2.0) is a universal macOS app for Apple silicon and Intel, on macOS 12 or later.
+[SMC Mixer Tool 1.2.1](https://github.com/deadjoe/SMC-Mixer-Tool/releases/tag/v1.2.1) is a universal macOS app for Apple silicon and Intel, on macOS 12 or later.
 
 The app is not notarized. The first time you open it, Control-click SMC Mixer Tool and choose Open.
 
@@ -41,7 +41,7 @@ Export saves the profile on screen as JSON. Copy JSON puts that JSON on the clip
 | Shift+Cmd+C | Copy the profile as JSON |
 | Shift+Cmd+D | Diagnostics |
 
-The gear at the top right opens diagnostics. It reports the USB-C Private and Master ports, the Bluetooth MIDI port, which path carries settings, and the last error. A Bluetooth connection also lists manufacturer, model, battery, signal, and services. Read settings loads the 6,282-byte image, and Export image saves it. Diagnostics and About SMC Mixer Tool show the version: `1.2.0` plus the git commit of the build, with `.dirty` for a build with uncommitted changes.
+The gear at the top right opens diagnostics. It reports the USB-C Private and Master ports, the Bluetooth MIDI port, which path carries settings, and the last error. A Bluetooth connection also lists manufacturer, model, battery, signal, and services. Read settings loads the 6,282-byte image, and Export image saves it. Diagnostics and About SMC Mixer Tool show the version: `1.2.1` plus the git commit of the build, with `.dirty` for a build with uncommitted changes.
 
 ## MIDI each type sends
 
