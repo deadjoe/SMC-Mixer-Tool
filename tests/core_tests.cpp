@@ -1,14 +1,18 @@
 #include "ControlConfiguration.h"
+#include "MidiStream.h"
 #include "SettingsDocument.h"
 #include "SettingsProtocol.h"
+#include "SettingsWriter.h"
 #include "VendorProtocol.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <functional>
 #include <iostream>
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace
 {
@@ -71,6 +75,265 @@ Bytes settingsChunk(std::uint32_t address, const Bytes& data)
     };
     body.insert(body.end(), data.begin(), data.end());
     return framed(0x23, body);
+}
+
+// A mixer with separate RAM and flash, answering vendor payloads the way the real one does:
+// a 0x22 write changes RAM, a 0x23 read returns RAM, and the empty 0x22 save copies RAM to flash.
+struct FakeMixer
+{
+    Bytes ram = Bytes(layout::snapshotSize);
+    Bytes flash = Bytes(layout::snapshotSize);
+    std::vector<SettingsWriter::Step> steps;
+    int dropWriteAcks = 0;        // writes applied but not acknowledged
+    int failReads = 0;            // read requests that get no reply
+    int dropSaveAcks = 0;         // saves not performed and not acknowledged
+    bool rejectWrites = false;    // status 1 for data writes
+    bool rejectSave = false;      // status 1 for the save
+    bool corruptReads = false;    // read-back returns one changed byte
+    bool linkDown = false;        // exchange throws
+
+    std::vector<Bytes> answer(const SettingsWriter::Request& request)
+    {
+        steps.push_back(request.step);
+        if (linkDown)
+            throw std::runtime_error("The mixer did not answer on this link");
+        const auto& payload = request.payload;
+        const auto address = static_cast<std::size_t>(payload[7]) | (static_cast<std::size_t>(payload[8]) << 8);
+        const auto length = static_cast<std::size_t>(payload[11]) | (static_cast<std::size_t>(payload[12]) << 8);
+        if (payload[2] == 0x23)
+        {
+            if (failReads > 0)
+            {
+                --failReads;
+                return {};
+            }
+            Bytes data(ram.begin() + static_cast<std::ptrdiff_t>(address),
+                       ram.begin() + static_cast<std::ptrdiff_t>(address + length));
+            if (corruptReads)
+                data.front() ^= 1;
+            return { settingsChunk(static_cast<std::uint32_t>(address), data) };
+        }
+        if (length == 0)
+        {
+            if (rejectSave)
+                return { framed(0x00, { 0x01 }) };
+            if (dropSaveAcks > 0)
+            {
+                --dropSaveAcks;
+                return {};
+            }
+            flash = ram;
+            return { framed(0x00, { 0x00 }) };
+        }
+        if (rejectWrites)
+            return { framed(0x00, { 0x01 }) };
+        std::copy(payload.begin() + 14, payload.begin() + 14 + static_cast<std::ptrdiff_t>(length),
+                  ram.begin() + static_cast<std::ptrdiff_t>(address));
+        if (dropWriteAcks > 0)
+        {
+            --dropWriteAcks;
+            return {};
+        }
+        return { framed(0x00, { 0x00 }) };
+    }
+
+    SettingsWriter::Exchange exchange()
+    {
+        return [this](const SettingsWriter::Request& request) { return answer(request); };
+    }
+};
+
+SettingsSpan userKnob(int index, Bytes data)
+{
+    return { static_cast<std::uint32_t>(layout::profileSize + layout::knobsOffset + static_cast<std::size_t>(index) * layout::knobSize),
+             std::move(data) };
+}
+
+SettingsSpan userButton(int index, std::uint8_t fill)
+{
+    return { static_cast<std::uint32_t>(layout::profileSize + static_cast<std::size_t>(index) * layout::buttonSize),
+             Bytes(layout::buttonSize, fill) };
+}
+
+bool sameRange(const Bytes& image, const SettingsSpan& span)
+{
+    return std::equal(span.data.begin(), span.data.end(), image.begin() + static_cast<std::ptrdiff_t>(span.address));
+}
+
+void testWriter()
+{
+    using Step = SettingsWriter::Step;
+    const auto knob = userKnob(1, { 3, 2, 0, 103, 127, 1 });
+    const auto button = userButton(42, 9);
+
+    {
+        FakeMixer mixer;
+        std::vector<double> progress;
+        const auto written = SettingsWriter::write({ knob, button }, mixer.exchange(),
+                                                   [&](double value) { progress.push_back(value); });
+        expect(written && written->size() == 2, "writer returns both spans");
+        expect(mixer.steps == std::vector<Step>({ Step::write, Step::readBack, Step::write, Step::readBack, Step::save }),
+               "writer order is write, read back, then one save");
+        expect(sameRange(mixer.flash, knob) && sameRange(mixer.flash, button), "save puts both records in flash");
+        expect(!progress.empty() && progress.back() == 1.0, "progress ends at 1");
+        expect(std::is_sorted(progress.begin(), progress.end()), "progress never goes back");
+    }
+    {
+        FakeMixer mixer;
+        mixer.dropWriteAcks = 1;
+        expect(SettingsWriter::write({ knob }, mixer.exchange()).has_value(), "a lost write ack is retried");
+        expect(std::count(mixer.steps.begin(), mixer.steps.end(), Step::write) == 2, "the write is sent twice");
+        expect(sameRange(mixer.flash, knob), "retried write is saved");
+    }
+    {
+        FakeMixer mixer;
+        mixer.failReads = 1;
+        expect(SettingsWriter::write({ knob }, mixer.exchange()).has_value(), "a missing read-back is retried");
+    }
+    {
+        FakeMixer mixer;
+        mixer.rejectWrites = true;
+        expectThrow("rejected write stops", [&] { SettingsWriter::write({ knob, button }, mixer.exchange()); },
+                    "was not written");
+        expect(std::count(mixer.steps.begin(), mixer.steps.end(), Step::write) == 1, "a rejected write is not retried");
+        expect(std::count(mixer.steps.begin(), mixer.steps.end(), Step::save) == 0, "a rejected write is never saved");
+    }
+    {
+        FakeMixer mixer;
+        mixer.corruptReads = true;
+        expectThrow("read-back mismatch stops", [&] { SettingsWriter::write({ knob }, mixer.exchange()); },
+                    "read back different bytes");
+        expect(std::count(mixer.steps.begin(), mixer.steps.end(), Step::save) == 0, "a mismatch is never saved");
+        expect(mixer.flash == Bytes(layout::snapshotSize), "flash keeps the old bytes after a mismatch");
+    }
+    {
+        FakeMixer mixer;
+        mixer.failReads = 2;
+        expectThrow("unreadable record stops", [&] { SettingsWriter::write({ knob }, mixer.exchange()); },
+                    "could not be read back");
+        expect(std::count(mixer.steps.begin(), mixer.steps.end(), Step::save) == 0, "an unread record is never saved");
+    }
+    {
+        FakeMixer mixer;
+        mixer.dropSaveAcks = 1;
+        expect(SettingsWriter::write({ knob }, mixer.exchange()).has_value(), "a lost save ack is retried");
+        expect(std::count(mixer.steps.begin(), mixer.steps.end(), Step::save) == 2, "the save is sent twice");
+    }
+    {
+        FakeMixer mixer;
+        mixer.dropSaveAcks = 2;
+        expectThrow("unconfirmed save", [&] { SettingsWriter::write({ knob }, mixer.exchange()); },
+                    "save was not confirmed");
+    }
+    {
+        FakeMixer mixer;
+        mixer.rejectSave = true;
+        expectThrow("refused save", [&] { SettingsWriter::write({ knob }, mixer.exchange()); }, "refused to save");
+        expect(std::count(mixer.steps.begin(), mixer.steps.end(), Step::save) == 1, "a refused save is not retried");
+    }
+    {
+        FakeMixer mixer;
+        mixer.linkDown = true;
+        expectThrow("link down", [&] { SettingsWriter::write({ knob }, mixer.exchange()); }, "did not answer");
+    }
+    {
+        FakeMixer mixer;
+        int checks = 0;
+        const auto written = SettingsWriter::write({ knob, button }, mixer.exchange(), {},
+                                                   [&] { return ++checks > 2; });
+        expect(!written, "cancel returns nothing");
+        expect(std::count(mixer.steps.begin(), mixer.steps.end(), Step::save) == 0, "a cancelled write is never saved");
+    }
+
+    expectThrow("no spans", [] { SettingsWriter::validate({}); }, "no changed records");
+    expectThrow("daw span", [] { SettingsWriter::validate({ { 0, Bytes(layout::buttonSize) } }); }, "read-only");
+    expectThrow("misaligned span", [] {
+        SettingsWriter::validate({ { static_cast<std::uint32_t>(layout::profileSize + 1), Bytes(layout::buttonSize) } });
+    }, "invalid address");
+    expectThrow("knob size at a fader", [] {
+        SettingsWriter::validate({ { static_cast<std::uint32_t>(layout::profileSize + layout::slidersOffset), Bytes(layout::knobSize) } });
+    }, "invalid address");
+    expectThrow("span past the end", [] {
+        SettingsWriter::validate({ { static_cast<std::uint32_t>(layout::snapshotSize - 2), Bytes(layout::knobSize) } });
+    }, "invalid address");
+    expectThrow("duplicate span", [&] { SettingsWriter::validate({ knob, knob }); }, "twice");
+    SettingsWriter::validate({ userKnob(7, Bytes(layout::knobSize)),
+                               { static_cast<std::uint32_t>(layout::profileSize + layout::slidersOffset + 7 * layout::sliderSize),
+                                 Bytes(layout::sliderSize) },
+                               userButton(0, 0) });
+}
+
+void testMidiStream()
+{
+    std::vector<Bytes> done;
+    SysExAssembler assembler;
+    const Bytes first { 0xF0, 0x00, 0x32 };
+    const Bytes rest { 0xF8, 0x45, 0xF7, 0x90, 0x40, 0x7F, 0xF0, 0x01, 0xF7 };
+    assembler.feed(first.data(), first.size(), done);
+    expect(done.empty(), "sysex waits for F7");
+    assembler.feed(rest.data(), rest.size(), done);
+    expect(done.size() == 2, "two messages complete");
+    expect(!done.empty() && done.front() == Bytes({ 0xF0, 0x00, 0x32, 0x45, 0xF7 }), "split sysex skips clock");
+    expect(done.size() == 2 && done.back() == Bytes({ 0xF0, 0x01, 0xF7 }), "note between messages is ignored");
+
+    done.clear();
+    const Bytes broken { 0xF0, 0x11, 0xB0, 0x22, 0xF7, 0xF0, 0x33, 0xF7 };
+    assembler.feed(broken.data(), broken.size(), done);
+    expect(done.size() == 1 && done.front() == Bytes({ 0xF0, 0x33, 0xF7 }), "status byte drops the unfinished sysex");
+
+    done.clear();
+    const Bytes empty { 0xF0, 0xF7 };
+    assembler.feed(empty.data(), empty.size(), done);
+    expect(done.empty(), "empty sysex is dropped");
+
+    done.clear();
+    Bytes huge(SysExAssembler::maximumSize + 10, 0x01);
+    huge.front() = 0xF0;
+    huge.back() = 0xF7;
+    assembler.feed(huge.data(), huge.size(), done);
+    expect(done.empty(), "oversized sysex is dropped");
+
+    expect(midiname::join({ "SMC-Mixer", "-Private", "-Private" }) == "SMC-Mixer -Private", "private port name");
+    expect(midiname::join({ "SMC-Mixer", "Bluetooth", "Bluetooth" }) == "SMC-Mixer Bluetooth", "bluetooth port name");
+    expect(midiname::join({ "SMC-Mixer", "SMC-Mixer -Master", "-Master" }) == "SMC-Mixer -Master", "longer entity name");
+    expect(midiname::join({ "(none)", "-Private", "(unknown)" }) == "-Private", "placeholders are skipped");
+    expect(midiname::containsIgnoringCase("SMC-Mixer -Private", "private"), "port match ignores case");
+}
+
+void testFieldLimits()
+{
+    SettingsDocument document;
+    document.load(Bytes(layout::snapshotSize));
+    std::string error;
+    const ControlSelection knob { ControlKind::knob, 0 };
+    const ControlSelection slider { ControlKind::slider, 0 };
+    const ControlSelection button { ControlKind::trackButton, 0 };
+    expect(document.apply(knob, DeviceProfile::ccUser, EditableField::channel, 15, error), "channel 16");
+    expect(!document.apply(knob, DeviceProfile::ccUser, EditableField::channel, 16, error), "channel 17 rejected");
+    expect(error == "Channel must be 1 to 16.", "channel message");
+    expect(!document.apply(knob, DeviceProfile::ccUser, EditableField::cc, 128, error), "cc 128 rejected");
+    expect(!document.apply(button, DeviceProfile::ccUser, EditableField::value2, 200, error), "value 200 rejected");
+    expect(document.apply(button, DeviceProfile::ccUser, EditableField::led, 255, error), "led 255");
+    expect(document.apply(knob, DeviceProfile::ccUser, EditableField::type, 3, error), "knob type 3");
+    expect(!document.apply(knob, DeviceProfile::ccUser, EditableField::type, 4, error), "knob type 4 rejected");
+    expect(!document.apply(slider, DeviceProfile::ccUser, EditableField::type, 3, error), "slider type 3 rejected");
+    expect(!document.apply(button, DeviceProfile::ccUser, EditableField::mode, 6, error), "mode 6 rejected");
+
+    // An edit sends the whole record, so bytes the app never shows must go back unchanged.
+    Bytes image(layout::snapshotSize);
+    const auto record = layout::profileSize + 5 * layout::buttonSize;
+    image[record + 5] = 3;
+    for (std::size_t offset = 6; offset < 70; ++offset)
+        image[record + offset] = static_cast<std::uint8_t>(offset);
+    SettingsDocument kept;
+    kept.load(image);
+    expect(kept.apply({ ControlKind::trackButton, 5 }, DeviceProfile::ccUser, EditableField::cc, 99, error), "button cc");
+    const auto spans = kept.dirtySpans();
+    bool untouched = spans.size() == 1 && spans.front().address == record;
+    for (std::size_t offset = 5; untouched && offset < 70; ++offset)
+        untouched = spans.front().data[offset] == image[record + offset];
+    expect(untouched, "message and unused bytes are written back as read");
+    expect(!spans.empty() && spans.front().data[2] == 99, "only the edited byte changes");
 }
 }
 
@@ -175,8 +438,12 @@ int main()
     expect(document.workingBytes()[layout::profileSize + layout::knobsOffset + 3] == 70, "cc byte");
     expect(!document.apply({ ControlKind::knob, 0 }, DeviceProfile::daw, EditableField::cc, 1, error), "daw locked");
     expect(error == "DAW profile is read-only.", "daw message");
-    expect(!document.apply({ ControlKind::knob, 0 }, DeviceProfile::ccUser, EditableField::minimum, 200, error), "min above max");
+    expect(!document.apply({ ControlKind::knob, 0 }, DeviceProfile::ccUser, EditableField::minimum, 200, error), "min 200 rejected");
+    expect(error == "Value must be 0 to 127.", "range message");
+    expect(document.apply({ ControlKind::knob, 0 }, DeviceProfile::ccUser, EditableField::maximum, 50, error), "max 50");
+    expect(!document.apply({ ControlKind::knob, 0 }, DeviceProfile::ccUser, EditableField::minimum, 60, error), "min above max");
     expect(error == "Min cannot exceed Max.", "min message");
+    expect(document.apply({ ControlKind::knob, 0 }, DeviceProfile::ccUser, EditableField::maximum, 127, error), "max back to 127");
     expect(document.apply({ ControlKind::knob, 0 }, DeviceProfile::ccUser, EditableField::minimum, 127, error), "min may equal max");
     expect(!document.apply({ ControlKind::knob, 8 }, DeviceProfile::ccUser, EditableField::cc, 1, error), "index rejected");
 
@@ -269,6 +536,10 @@ int main()
     const auto dawJson = ControlConfiguration::parse(exported).toJson(DeviceProfile::daw);
     expect(dawJson.find("\"profile\": \"DAW\"") != std::string::npos, "json daw profile");
     expect(dawJson.find("\"cc\": 31") == std::string::npos, "daw json omits the cc user cc");
+
+    testWriter();
+    testMidiStream();
+    testFieldLimits();
 
     if (failures != 0)
     {

@@ -119,6 +119,23 @@ std::optional<std::size_t> SettingsDocument::fieldOffset(ControlKind kind, Edita
     return std::nullopt;
 }
 
+std::uint8_t SettingsDocument::fieldMaximum(ControlKind kind, EditableField field)
+{
+    switch (field)
+    {
+        case EditableField::type: return kind == ControlKind::knob ? 3 : 2;
+        case EditableField::mode: return 5;
+        case EditableField::channel: return 15;
+        case EditableField::led: return 255;
+        case EditableField::cc:
+        case EditableField::minimum:
+        case EditableField::maximum:
+        case EditableField::value1:
+        case EditableField::value2: return 127; // MIDI data bytes have seven bits
+    }
+    return 0;
+}
+
 bool SettingsDocument::apply(ControlSelection selection,
                              DeviceProfile profile,
                              EditableField field,
@@ -142,6 +159,14 @@ bool SettingsDocument::apply(ControlSelection selection,
     if (!range || !localOffset || range->offset + range->size > working.size() || *localOffset >= range->size)
     {
         error = "This field cannot be edited.";
+        return false;
+    }
+
+    const auto limit = fieldMaximum(selection.kind, field);
+    if (value > limit)
+    {
+        error = (field == EditableField::channel ? "Channel must be 1 to 16."
+                                                 : "Value must be 0 to " + std::to_string(limit) + ".");
         return false;
     }
 

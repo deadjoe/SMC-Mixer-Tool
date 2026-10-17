@@ -125,4 +125,4 @@ add_executable(SMCMixerCoreTests
 )
 target_include_directories(SMCMixerCoreTests PRIVATE Source)
 target_compile_features(SMCMixerCoreTests PRIVATE cxx_std_17)
-target_compile_options(SMCMixerCoreTests PRIVATE -Wall -Wextra -Wpedantic)
+target_compile_options(SMCMixerCoreTests PRIVATE -Wall -Wextra -Wpedantic -Werror)

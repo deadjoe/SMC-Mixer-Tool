@@ -38,6 +38,7 @@ private:
 
     static std::optional<RecordRange> recordRange(ControlSelection selection, DeviceProfile profile);
     static std::optional<std::size_t> fieldOffset(ControlKind kind, EditableField field);
+    static std::uint8_t fieldMaximum(ControlKind kind, EditableField field);
 
     Bytes original;
     Bytes working;
