@@ -18,7 +18,6 @@ struct VersionInfo
     std::string deviceName;
     int versionNumber = 0;
     std::string versionLabel;
-    Bytes versionDigitBytes;
     Bytes rawPayload;
 };
 
@@ -39,7 +38,6 @@ struct DeviceSnapshot
     bool hasHealth = false;
     std::string sourceName;
     std::string destinationName;
-    Bytes rawSysEx;
     std::string warning;
 };
 

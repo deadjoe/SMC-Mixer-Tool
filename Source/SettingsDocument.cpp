@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <initializer_list>
 #include <stdexcept>
 #include <utility>
 
@@ -17,17 +18,22 @@ bool sameBytes(const Bytes& left, const Bytes& right, std::size_t offset, std::s
 
 void SettingsDocument::load(const Bytes& snapshot)
 {
-    if (snapshot.size() != layout::snapshotSize)
-        throw std::runtime_error("Control configuration must contain exactly 6282 bytes");
+    // parse() checks the size and every button message before anything is replaced.
     ControlConfiguration::parse(snapshot);
     original = snapshot;
     working = snapshot;
+    undoStack.clear();
+    redoStack.clear();
+    lastEdit.reset();
 }
 
 void SettingsDocument::clear()
 {
     original.clear();
     working.clear();
+    undoStack.clear();
+    redoStack.clear();
+    lastEdit.reset();
 }
 
 ControlConfiguration SettingsDocument::configuration() const
@@ -38,172 +44,154 @@ ControlConfiguration SettingsDocument::configuration() const
 std::optional<SettingsDocument::RecordRange> SettingsDocument::recordRange(ControlSelection selection,
                                                                            DeviceProfile profile)
 {
-    if (selection.index < 0)
+    if (!isValidControl(selection))
         return std::nullopt;
 
     const auto base = static_cast<std::size_t>(profile) * layout::profileSize;
+    const auto index = static_cast<std::size_t>(selection.index);
     switch (selection.kind)
     {
         case ControlKind::knob:
-            if (selection.index >= static_cast<int>(layout::knobCount))
-                return std::nullopt;
-            return RecordRange { base + layout::knobsOffset + static_cast<std::size_t>(selection.index) * layout::knobSize,
-                                 layout::knobSize };
+            return RecordRange { base + layout::knobsOffset + index * layout::knobSize, layout::knobSize };
         case ControlKind::slider:
-            if (selection.index >= static_cast<int>(layout::sliderCount))
-                return std::nullopt;
-            return RecordRange { base + layout::slidersOffset + static_cast<std::size_t>(selection.index) * layout::sliderSize,
-                                 layout::sliderSize };
+            return RecordRange { base + layout::slidersOffset + index * layout::sliderSize, layout::sliderSize };
         case ControlKind::trackButton:
-            if (selection.index >= 32)
-                return std::nullopt;
-            return RecordRange { base + static_cast<std::size_t>(selection.index) * layout::buttonSize,
-                                 layout::buttonSize };
         case ControlKind::globalButton:
-            if (selection.index >= 11)
-                return std::nullopt;
-            return RecordRange { base + static_cast<std::size_t>(32 + selection.index) * layout::buttonSize,
-                                 layout::buttonSize };
+            return RecordRange { base + buttonRecordIndex(selection) * layout::buttonSize, layout::buttonSize };
     }
     return std::nullopt;
 }
 
 std::optional<std::size_t> SettingsDocument::fieldOffset(ControlKind kind, EditableField field)
 {
+    if (!hasField(kind, field))
+        return std::nullopt;
+
+    // Byte positions inside each record. hasField() above has ruled out the rest.
+    const auto at = [field](std::initializer_list<std::pair<EditableField, std::size_t>> offsets) -> std::optional<std::size_t> {
+        for (const auto& [candidate, offset] : offsets)
+            if (candidate == field)
+                return offset;
+        return std::nullopt;
+    };
     switch (kind)
     {
         case ControlKind::knob:
-            switch (field)
-            {
-                case EditableField::type: return 0;
-                case EditableField::mode: return std::nullopt;
-                case EditableField::channel: return 2;
-                case EditableField::cc: return 3;
-                case EditableField::minimum: return 4;
-                case EditableField::maximum: return 5;
-                case EditableField::value1:
-                case EditableField::value2:
-                case EditableField::led: return std::nullopt;
-            }
-            return std::nullopt;
+            return at({ { EditableField::type, 0 }, { EditableField::channel, 2 }, { EditableField::cc, 3 },
+                        { EditableField::minimum, 4 }, { EditableField::maximum, 5 } });
         case ControlKind::slider:
-            switch (field)
-            {
-                case EditableField::type: return 0;
-                case EditableField::mode: return std::nullopt;
-                case EditableField::channel: return 1;
-                case EditableField::cc: return 2;
-                case EditableField::minimum: return 3;
-                case EditableField::maximum: return 4;
-                case EditableField::value1:
-                case EditableField::value2:
-                case EditableField::led: return std::nullopt;
-            }
-            return std::nullopt;
+            return at({ { EditableField::type, 0 }, { EditableField::channel, 1 }, { EditableField::cc, 2 },
+                        { EditableField::minimum, 3 }, { EditableField::maximum, 4 } });
         case ControlKind::trackButton:
         case ControlKind::globalButton:
-            switch (field)
-            {
-                case EditableField::mode: return 0;
-                case EditableField::type: return std::nullopt;
-                case EditableField::channel: return 1;
-                case EditableField::cc: return 2;
-                case EditableField::value1: return 3;
-                case EditableField::value2: return 4;
-                case EditableField::led: return 70;
-                case EditableField::minimum:
-                case EditableField::maximum: return std::nullopt;
-            }
-            return std::nullopt;
+            return at({ { EditableField::mode, 0 }, { EditableField::channel, 1 }, { EditableField::cc, 2 },
+                        { EditableField::value1, 3 }, { EditableField::value2, 4 },
+                        { EditableField::led, layout::buttonSize - 1 } });
     }
     return std::nullopt;
 }
 
-std::uint8_t SettingsDocument::fieldMaximum(ControlKind kind, EditableField field)
+void SettingsDocument::remember()
 {
-    switch (field)
-    {
-        case EditableField::type: return kind == ControlKind::knob ? 3 : 2;
-        case EditableField::mode: return 5;
-        case EditableField::channel: return 15;
-        case EditableField::led: return 255;
-        case EditableField::cc:
-        case EditableField::minimum:
-        case EditableField::maximum:
-        case EditableField::value1:
-        case EditableField::value2: return 127; // MIDI data bytes have seven bits
-    }
-    return 0;
+    undoStack.push_back(working);
+    if (undoStack.size() > undoLimit)
+        undoStack.erase(undoStack.begin());
+    redoStack.clear();
 }
 
-bool SettingsDocument::apply(ControlSelection selection,
-                             DeviceProfile profile,
-                             EditableField field,
-                             std::uint8_t value,
-                             std::string& error)
+EditResult SettingsDocument::apply(ControlSelection selection,
+                                   DeviceProfile profile,
+                                   EditableField field,
+                                   std::uint8_t value,
+                                   bool continuingGesture)
 {
-    error.clear();
     if (!loaded())
-    {
-        error = "Configuration is not loaded.";
-        return false;
-    }
+        return { false, "Configuration is not loaded." };
     if (profile != DeviceProfile::ccUser)
-    {
-        error = "DAW profile is read-only.";
-        return false;
-    }
+        return { false, "DAW profile is read-only." };
 
     const auto range = recordRange(selection, profile);
     const auto localOffset = fieldOffset(selection.kind, field);
-    if (!range || !localOffset || range->offset + range->size > working.size() || *localOffset >= range->size)
-    {
-        error = "This field cannot be edited.";
-        return false;
-    }
+    if (!range || !localOffset)
+        return { false, "This field cannot be edited." };
 
-    const auto limit = fieldMaximum(selection.kind, field);
-    if (value > limit)
+    const auto current = configuration().profile(profile);
+    if (!fieldLimits(selection.kind, field).contains(value))
     {
-        error = (field == EditableField::channel ? "Channel must be 1 to 16."
-                                                 : "Value must be 0 to " + std::to_string(limit) + ".");
-        return false;
+        const auto limit = fieldLimits(selection.kind, field).maximum;
+        return { false, field == EditableField::channel ? std::string("Channel must be 1 to 16.")
+                                                        : "Value must be 0 to " + std::to_string(limit) + "." };
     }
+    if (!allowedRange(current, selection, field).contains(value))
+        return { false, field == EditableField::minimum ? "Min cannot exceed Max." : "Max cannot be below Min." };
 
-    // A relative knob sends Min on each counter-clockwise step and Max on each clockwise step,
-    // so the pair is two values, not a range. Mackie's 65 and 1 must stay possible.
-    const auto relativeKnob = selection.kind == ControlKind::knob
-        && working[range->offset] == knobTypeRelative;
-    if ((field == EditableField::minimum || field == EditableField::maximum) && !relativeKnob)
+    const EditKey key { selection, profile, field };
+    const auto offset = range->offset + *localOffset;
+    if (working[offset] == value)
+        return { true, {} };
+
+    if (!(continuingGesture && lastEdit && *lastEdit == key && !undoStack.empty()))
+        remember();
+    lastEdit = key;
+    working[offset] = value;
+
+    // Leaving the relative type turns Min and Max back into a range. Two values sent per
+    // step, such as 65 and 1, would otherwise leave Min above Max with no way to edit Min.
+    EditResult result { true, {} };
+    if (field == EditableField::type && selection.kind == ControlKind::knob && value != knobTypeRelative)
     {
-        const auto minimumOffset = fieldOffset(selection.kind, EditableField::minimum);
-        const auto maximumOffset = fieldOffset(selection.kind, EditableField::maximum);
-        if (!minimumOffset || !maximumOffset)
+        const auto minimumAt = range->offset + *fieldOffset(selection.kind, EditableField::minimum);
+        const auto maximumAt = range->offset + *fieldOffset(selection.kind, EditableField::maximum);
+        if (working[minimumAt] > working[maximumAt])
         {
-            error = "This field cannot be edited.";
-            return false;
-        }
-        const auto minimum = field == EditableField::minimum ? value : working[range->offset + *minimumOffset];
-        const auto maximum = field == EditableField::maximum ? value : working[range->offset + *maximumOffset];
-        if (minimum > maximum)
-        {
-            error = "Min cannot exceed Max.";
-            return false;
+            std::swap(working[minimumAt], working[maximumAt]);
+            result.message = "Min and Max were swapped so that Min is not above Max.";
         }
     }
-
-    working[range->offset + *localOffset] = value;
-    return true;
+    return result;
 }
 
 void SettingsDocument::revert(ControlSelection selection, DeviceProfile profile)
 {
     const auto range = recordRange(selection, profile);
-    if (!range || range->offset + range->size > working.size() || range->offset + range->size > original.size())
+    if (!loaded() || !range || sameBytes(working, original, range->offset, range->size))
         return;
+    remember();
+    lastEdit.reset();
     std::copy_n(original.begin() + static_cast<std::ptrdiff_t>(range->offset),
                 range->size,
                 working.begin() + static_cast<std::ptrdiff_t>(range->offset));
+}
+
+void SettingsDocument::revertAll()
+{
+    if (!isDirty())
+        return;
+    remember();
+    lastEdit.reset();
+    working = original;
+}
+
+bool SettingsDocument::undo()
+{
+    if (undoStack.empty())
+        return false;
+    redoStack.push_back(std::move(working));
+    working = std::move(undoStack.back());
+    undoStack.pop_back();
+    lastEdit.reset();
+    return true;
+}
+
+bool SettingsDocument::redo()
+{
+    if (redoStack.empty())
+        return false;
+    undoStack.push_back(std::move(working));
+    working = std::move(redoStack.back());
+    redoStack.pop_back();
+    lastEdit.reset();
+    return true;
 }
 
 bool SettingsDocument::isDirty() const
@@ -216,66 +204,39 @@ bool SettingsDocument::isRecordDirty(ControlSelection selection, DeviceProfile p
     if (!loaded())
         return false;
     const auto range = recordRange(selection, profile);
-    if (!range)
-        return false;
-    return !sameBytes(working, original, range->offset, range->size);
+    return range && !sameBytes(working, original, range->offset, range->size);
 }
 
 std::vector<ControlSelection> SettingsDocument::dirtyControls() const
 {
     std::vector<ControlSelection> dirty;
-    const ControlSelection controls[] = {
-        { ControlKind::knob, 0 }, { ControlKind::knob, 1 }, { ControlKind::knob, 2 }, { ControlKind::knob, 3 },
-        { ControlKind::knob, 4 }, { ControlKind::knob, 5 }, { ControlKind::knob, 6 }, { ControlKind::knob, 7 },
-        { ControlKind::slider, 0 }, { ControlKind::slider, 1 }, { ControlKind::slider, 2 }, { ControlKind::slider, 3 },
-        { ControlKind::slider, 4 }, { ControlKind::slider, 5 }, { ControlKind::slider, 6 }, { ControlKind::slider, 7 }
-    };
-    for (const auto& control : controls)
+    for (const auto& control : allControls())
         if (isRecordDirty(control, DeviceProfile::daw) || isRecordDirty(control, DeviceProfile::ccUser))
             dirty.push_back(control);
-
-    for (int index = 0; index < 32; ++index)
-    {
-        const ControlSelection control { ControlKind::trackButton, index };
-        if (isRecordDirty(control, DeviceProfile::daw) || isRecordDirty(control, DeviceProfile::ccUser))
-            dirty.push_back(control);
-    }
-    for (int index = 0; index < 11; ++index)
-    {
-        const ControlSelection control { ControlKind::globalButton, index };
-        if (isRecordDirty(control, DeviceProfile::daw) || isRecordDirty(control, DeviceProfile::ccUser))
-            dirty.push_back(control);
-    }
     return dirty;
 }
 
 std::vector<SettingsSpan> SettingsDocument::dirtySpans() const
 {
     std::vector<SettingsSpan> spans;
-    const auto append = [&](ControlSelection selection, DeviceProfile profile) {
-        if (!isRecordDirty(selection, profile))
-            return;
-        const auto range = recordRange(selection, profile);
-        if (!range)
-            return;
-        SettingsSpan span;
-        span.address = static_cast<std::uint32_t>(range->offset);
-        span.data.assign(working.begin() + static_cast<std::ptrdiff_t>(range->offset),
-                         working.begin() + static_cast<std::ptrdiff_t>(range->offset + range->size));
-        spans.push_back(std::move(span));
-    };
-
     for (const auto profile : { DeviceProfile::daw, DeviceProfile::ccUser })
     {
-        for (int index = 0; index < 32; ++index)
-            append({ ControlKind::trackButton, index }, profile);
-        for (int index = 0; index < 11; ++index)
-            append({ ControlKind::globalButton, index }, profile);
-        for (int index = 0; index < 8; ++index)
-            append({ ControlKind::knob, index }, profile);
-        for (int index = 0; index < 8; ++index)
-            append({ ControlKind::slider, index }, profile);
+        for (const auto& control : allControls())
+        {
+            if (!isRecordDirty(control, profile))
+                continue;
+            const auto range = recordRange(control, profile);
+            SettingsSpan span;
+            span.address = static_cast<std::uint32_t>(range->offset);
+            span.data.assign(working.begin() + static_cast<std::ptrdiff_t>(range->offset),
+                             working.begin() + static_cast<std::ptrdiff_t>(range->offset + range->size));
+            spans.push_back(std::move(span));
+        }
     }
+    // Ascending addresses, the order the records sit in the image.
+    std::sort(spans.begin(), spans.end(), [](const SettingsSpan& left, const SettingsSpan& right) {
+        return left.address < right.address;
+    });
     return spans;
 }
 

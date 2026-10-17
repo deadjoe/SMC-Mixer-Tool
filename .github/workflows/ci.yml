@@ -2,6 +2,8 @@ name: CI
 
 on:
   push:
+    branches: [main]
+    tags: ['v*']
   pull_request:
 
 permissions:
@@ -15,16 +17,27 @@ jobs:
   macos:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Configure
-        run: cmake -S . -B build
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
 
-      - name: Core tests
-        run: cmake --build build --target SMCMixerCoreTests -j 4
+      - name: Build tests
+        run: cmake --build build --target SMCMixerCoreTests SMCMixerUITests -j 4
 
       - name: Run core tests
         run: ./build/SMCMixerCoreTests
+
+      - name: Run UI tests
+        run: ./build/SMCMixerUITests_artefacts/Debug/SMCMixerUITests --render ui-renders
+
+      - name: Keep the UI renders
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ui-renders
+          path: ui-renders
+          if-no-files-found: ignore
 
       - name: Build the app
         run: cmake --build build --target SMCMixerGUI -j 4

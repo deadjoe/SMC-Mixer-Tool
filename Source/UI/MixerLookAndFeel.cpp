@@ -1,133 +1,268 @@
 #include "MixerLookAndFeel.h"
 
-MixerLookAndFeel::MixerLookAndFeel()
+namespace
 {
-    setColour(juce::Label::textColourId, mixerui::ink);
-    setColour(juce::TextButton::buttonColourId, mixerui::keyIdle);
-    setColour(juce::TextButton::buttonOnColourId, mixerui::keyDown);
-    setColour(juce::TextButton::textColourOffId, mixerui::ink);
-    setColour(juce::TextButton::textColourOnId, mixerui::onShell);
-    setColour(juce::PopupMenu::backgroundColourId, mixerui::plate);
-    setColour(juce::PopupMenu::textColourId, mixerui::ink);
-    setColour(juce::PopupMenu::highlightedBackgroundColourId, mixerui::well);
-    setColour(juce::PopupMenu::highlightedTextColourId, mixerui::ink);
-    setColour(juce::TextEditor::backgroundColourId, mixerui::plate);
-    setColour(juce::TextEditor::textColourId, mixerui::ink);
-    setColour(juce::TextEditor::outlineColourId, mixerui::hairline);
-    setColour(juce::TextEditor::focusedOutlineColourId, mixerui::ink);
-    setColour(juce::TextEditor::highlightColourId, mixerui::knob.withAlpha(0.35f));
-    setColour(juce::ProgressBar::backgroundColourId, mixerui::well);
-    setColour(juce::ProgressBar::foregroundColourId, mixerui::knobOutline);
-    setColour(juce::ScrollBar::thumbColourId, mixerui::slot);
-    setColour(juce::Slider::backgroundColourId, juce::Colours::transparentBlack);
-    setColour(juce::Slider::thumbColourId, mixerui::fader);
-    setColour(juce::Slider::trackColourId, mixerui::slot);
-    setColour(juce::Slider::rotarySliderFillColourId, mixerui::knob);
-    setColour(juce::Slider::rotarySliderOutlineColourId, mixerui::knobOutline);
-    setColour(juce::Slider::textBoxOutlineColourId, juce::Colours::transparentBlack);
-    setColour(juce::TooltipWindow::backgroundColourId, mixerui::plate);
-    setColour(juce::TooltipWindow::textColourId, mixerui::ink);
-    setColour(juce::TooltipWindow::outlineColourId, mixerui::hairline);
-    setColour(juce::ComboBox::backgroundColourId, mixerui::shell);
-    setColour(juce::ComboBox::textColourId, mixerui::ink);
-    setColour(juce::ComboBox::outlineColourId, mixerui::hairline);
-    setColour(juce::ComboBox::focusedOutlineColourId, mixerui::knobOutline);
-    setColour(juce::ComboBox::arrowColourId, mixerui::muted);
-    setColour(juce::Label::textWhenEditingColourId, mixerui::ink);
-    setColour(juce::Label::backgroundWhenEditingColourId, mixerui::plate);
-    setColour(juce::Label::outlineWhenEditingColourId, mixerui::knobOutline);
+constexpr int menuItemHeight = 28;
+const juce::Identifier primaryProperty { "smcPrimary" };
+
+juce::String styleName(mixerui::Weight weight)
+{
+    switch (weight)
+    {
+        case mixerui::Weight::regular: return "Regular";
+        case mixerui::Weight::medium: return "Medium";
+        case mixerui::Weight::semibold: return "Semibold";
+        case mixerui::Weight::bold: return "Bold";
+    }
+    return "Regular";
 }
 
-juce::Font MixerLookAndFeel::font(float height, bool bold)
+juce::TextLayout tooltipLayout(const juce::String& text)
 {
-    return juce::Font(juce::FontOptions(height, bold ? juce::Font::bold : juce::Font::plain));
+    juce::AttributedString string;
+    string.setJustification(juce::Justification::topLeft);
+    string.append(text, mixerui::font(11.5f), mixerui::onDark);
+    juce::TextLayout layout;
+    layout.createLayoutWithBalancedLineLengths(string, 320.0f);
+    return layout;
+}
+}
+
+juce::String mixerui::systemFontName()
+{
+   #if JUCE_MAC
+    // CoreText resolves this private family name to SF in every weight.
+    return ".AppleSystemUIFont";
+   #elif JUCE_WINDOWS
+    return "Segoe UI";
+   #else
+    return juce::Font::getDefaultSansSerifFontName();
+   #endif
+}
+
+juce::Font mixerui::font(float points, Weight weight)
+{
+    return juce::Font(juce::FontOptions(systemFontName(), styleName(weight), 12.0f).withPointHeight(points));
+}
+
+juce::Font mixerui::captionFont(float points)
+{
+    return juce::Font(juce::FontOptions(systemFontName(), styleName(Weight::semibold), 12.0f)
+                          .withPointHeight(points)
+                          .withKerningFactor(0.06f));
+}
+
+juce::Colour mixerui::toneColour(Tone tone)
+{
+    switch (tone)
+    {
+        case Tone::neutral: return muted;
+        case Tone::busy: return ink;
+        case Tone::success: return success;
+        case Tone::warning: return warning;
+        case Tone::error: return error;
+    }
+    return muted;
+}
+
+void mixerui::paintCard(juce::Graphics& graphics, juce::Rectangle<float> bounds, float corner)
+{
+    // A soft two-step shadow, then the card and its hairline.
+    graphics.setColour(juce::Colour(0x0a3b2a14));
+    graphics.fillRoundedRectangle(bounds.translated(0.0f, 2.0f).expanded(0.5f), corner + 0.5f);
+    graphics.setColour(juce::Colour(0x063b2a14));
+    graphics.fillRoundedRectangle(bounds.translated(0.0f, 6.0f).reduced(4.0f, 0.0f), corner);
+    graphics.setColour(surface);
+    graphics.fillRoundedRectangle(bounds, corner);
+    graphics.setColour(hairline);
+    graphics.drawRoundedRectangle(bounds.reduced(0.5f), corner, 1.0f);
+}
+
+MixerLookAndFeel::MixerLookAndFeel()
+    : juce::LookAndFeel_V4(juce::LookAndFeel_V4::getLightColourScheme())
+{
+    setDefaultSansSerifTypefaceName(mixerui::systemFontName());
+
+    using namespace mixerui;
+    setColour(juce::ResizableWindow::backgroundColourId, window);
+    setColour(juce::DocumentWindow::backgroundColourId, window);
+    setColour(juce::Label::textColourId, ink);
+    setColour(juce::TextButton::buttonColourId, field);
+    setColour(juce::TextButton::buttonOnColourId, ink);
+    setColour(juce::TextButton::textColourOffId, ink);
+    setColour(juce::TextButton::textColourOnId, onDark);
+    setColour(juce::ComboBox::backgroundColourId, field);
+    setColour(juce::ComboBox::textColourId, ink);
+    setColour(juce::ComboBox::outlineColourId, hairlineStrong);
+    setColour(juce::ComboBox::focusedOutlineColourId, knobDeep);
+    setColour(juce::ComboBox::arrowColourId, muted);
+    setColour(juce::PopupMenu::backgroundColourId, field);
+    setColour(juce::PopupMenu::textColourId, ink);
+    setColour(juce::PopupMenu::highlightedBackgroundColourId, well);
+    setColour(juce::PopupMenu::highlightedTextColourId, ink);
+    setColour(juce::TextEditor::backgroundColourId, field);
+    setColour(juce::TextEditor::textColourId, ink);
+    setColour(juce::TextEditor::outlineColourId, hairlineStrong);
+    setColour(juce::TextEditor::focusedOutlineColourId, knobDeep);
+    setColour(juce::TextEditor::highlightColourId, knob.withAlpha(0.35f));
+    setColour(juce::TextEditor::highlightedTextColourId, ink);
+    setColour(juce::CaretComponent::caretColourId, ink);
+    setColour(juce::Label::textWhenEditingColourId, ink);
+    setColour(juce::Label::backgroundWhenEditingColourId, juce::Colours::transparentBlack);
+    setColour(juce::Label::outlineWhenEditingColourId, juce::Colours::transparentBlack);
+    setColour(juce::ScrollBar::thumbColourId, slot);
+    setColour(juce::TooltipWindow::backgroundColourId, ink);
+    setColour(juce::TooltipWindow::textColourId, onDark);
+    setColour(juce::TooltipWindow::outlineColourId, juce::Colours::transparentBlack);
+}
+
+void MixerLookAndFeel::setPrimary(juce::TextButton& button, bool primary)
+{
+    button.getProperties().set(primaryProperty, primary);
+    button.repaint();
+}
+
+bool MixerLookAndFeel::isPrimary(const juce::Component& component)
+{
+    return static_cast<bool>(component.getProperties().getWithDefault(primaryProperty, false));
 }
 
 juce::Font MixerLookAndFeel::getTextButtonFont(juce::TextButton&, int buttonHeight)
 {
-    return font(juce::jlimit(11.0f, 13.5f, static_cast<float>(buttonHeight) * 0.46f), true);
+    return mixerui::font(juce::jlimit(11.0f, 13.0f, static_cast<float>(buttonHeight) * 0.42f), mixerui::Weight::medium);
 }
 
-int MixerLookAndFeel::getSliderThumbRadius(juce::Slider& slider)
+void MixerLookAndFeel::drawButtonBackground(juce::Graphics& graphics, juce::Button& button,
+                                            const juce::Colour& backgroundColour, bool highlighted, bool down)
 {
-    if (slider.isVertical())
-        return juce::jmin(14, slider.getWidth() / 2, slider.getHeight() / 2);
-    return juce::LookAndFeel_V3::getSliderThumbRadius(slider);
+    using namespace mixerui;
+    auto bounds = button.getLocalBounds().toFloat().reduced(0.5f);
+    const auto enabled = button.isEnabled();
+    const auto on = button.getToggleState();
+    const auto primary = isPrimary(button) && enabled;
+
+    auto fill = primary ? ink : on ? button.findColour(juce::TextButton::buttonOnColourId) : backgroundColour;
+    if (enabled && down)
+        fill = fill.getPerceivedBrightness() > 0.5f ? fill.darker(0.08f) : fill.brighter(0.18f);
+    else if (enabled && highlighted)
+        fill = fill.getPerceivedBrightness() > 0.5f ? fill.darker(0.035f) : fill.brighter(0.1f);
+
+    // Segmented controls join their buttons along the connected edges.
+    const auto left = !button.isConnectedOnLeft();
+    const auto right = !button.isConnectedOnRight();
+    juce::Path shape;
+    shape.addRoundedRectangle(bounds.getX(), bounds.getY(), bounds.getWidth(), bounds.getHeight(),
+                              buttonCorner, buttonCorner, left, right, left, right);
+
+    if (enabled && !on && !primary && fill.getPerceivedBrightness() > 0.5f)
+    {
+        graphics.setColour(juce::Colour(0x0d3b2a14));
+        graphics.fillPath(shape, juce::AffineTransform::translation(0.0f, 1.0f));
+    }
+    // A selected segment that cannot be changed keeps a quiet fill rather than a grey ink block.
+    graphics.setColour(enabled ? fill : on ? well.darker(0.04f) : fill.withMultipliedAlpha(0.55f));
+    graphics.fillPath(shape);
+
+    if (!enabled && on)
+    {
+        graphics.setColour(hairlineStrong);
+        graphics.strokePath(shape, juce::PathStrokeType(1.0f));
+    }
+    else if (!on && !primary)
+    {
+        graphics.setColour(enabled ? hairlineStrong : hairline);
+        graphics.strokePath(shape, juce::PathStrokeType(1.0f));
+    }
+    if (button.hasKeyboardFocus(false) && button.isShowing() && button.getWantsKeyboardFocus())
+    {
+        graphics.setColour(knob.withAlpha(0.8f));
+        graphics.strokePath(shape, juce::PathStrokeType(2.0f));
+    }
 }
 
-namespace
+void MixerLookAndFeel::drawButtonText(juce::Graphics& graphics, juce::TextButton& button, bool, bool)
 {
-constexpr int menuItemHeight = 28;
-constexpr float menuCorner = 8.0f;
+    const auto primary = isPrimary(button) && button.isEnabled();
+    auto colour = primary ? mixerui::onDark
+                          : button.findColour(button.getToggleState() ? juce::TextButton::textColourOnId
+                                                                      : juce::TextButton::textColourOffId);
+    if (!button.isEnabled())
+        colour = button.getToggleState() ? mixerui::muted : mixerui::faint;
+    graphics.setColour(colour);
+    graphics.setFont(getTextButtonFont(button, button.getHeight()));
+    graphics.drawFittedText(button.getButtonText(), button.getLocalBounds().reduced(10, 2),
+                            juce::Justification::centred, 1, 0.8f);
 }
 
 void MixerLookAndFeel::drawComboBox(juce::Graphics& graphics, int width, int height, bool isButtonDown,
                                     int, int, int, int, juce::ComboBox& box)
 {
+    using namespace mixerui;
     const auto area = juce::Rectangle<float>(0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height))
                           .reduced(0.5f);
     const auto enabled = box.isEnabled();
-    const auto active = enabled && (box.isMouseOver(true) || isButtonDown || box.isPopupActive());
+    const auto hot = enabled && (box.isMouseOver(true) || isButtonDown || box.isPopupActive());
 
+    graphics.setColour(juce::Colour(0x0a3b2a14));
+    graphics.fillRoundedRectangle(area.translated(0.0f, 1.0f), fieldCorner);
     auto fill = box.findColour(juce::ComboBox::backgroundColourId);
-    if (isButtonDown || box.isPopupActive())
-        fill = mixerui::well;
-    else if (active)
-        fill = fill.brighter(0.04f);
-    graphics.setColour(fill.withMultipliedAlpha(enabled ? 1.0f : 0.6f));
+    if (hot)
+        fill = fill.darker(0.025f);
+    graphics.setColour(enabled ? fill : well);
     graphics.fillRoundedRectangle(area, fieldCorner);
 
-    const auto outline = box.hasKeyboardFocus(true) || box.isPopupActive()
-        ? box.findColour(juce::ComboBox::focusedOutlineColourId)
-        : active ? mixerui::slot : box.findColour(juce::ComboBox::outlineColourId);
-    graphics.setColour(outline.withMultipliedAlpha(enabled ? 1.0f : 0.6f));
-    graphics.drawRoundedRectangle(area, fieldCorner, 1.0f);
+    const auto focused = box.hasKeyboardFocus(true) || box.isPopupActive();
+    graphics.setColour(focused ? box.findColour(juce::ComboBox::focusedOutlineColourId) : hot ? slot : hairlineStrong);
+    graphics.drawRoundedRectangle(area, fieldCorner, focused ? 1.5f : 1.0f);
 
-    // A small chevron, centred in a fixed-width slot on the right.
-    const auto arrowZone = area.withLeft(area.getRight() - 26.0f);
-    const auto centre = arrowZone.getCentre();
-    juce::Path chevron;
-    chevron.startNewSubPath(centre.x - 4.0f, centre.y - 2.0f);
-    chevron.lineTo(centre.x, centre.y + 2.0f);
-    chevron.lineTo(centre.x + 4.0f, centre.y - 2.0f);
+    // Up and down chevrons, as on a macOS pop-up button.
+    const auto centre = area.withLeft(area.getRight() - 24.0f).getCentre();
+    juce::Path chevrons;
+    chevrons.startNewSubPath(centre.x - 3.5f, centre.y - 2.0f);
+    chevrons.lineTo(centre.x, centre.y - 5.5f);
+    chevrons.lineTo(centre.x + 3.5f, centre.y - 2.0f);
+    chevrons.startNewSubPath(centre.x - 3.5f, centre.y + 2.0f);
+    chevrons.lineTo(centre.x, centre.y + 5.5f);
+    chevrons.lineTo(centre.x + 3.5f, centre.y + 2.0f);
     graphics.setColour(box.findColour(juce::ComboBox::arrowColourId).withMultipliedAlpha(enabled ? 1.0f : 0.5f));
-    graphics.strokePath(chevron, juce::PathStrokeType(1.6f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+    graphics.strokePath(chevrons, juce::PathStrokeType(1.4f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
 }
 
 juce::Font MixerLookAndFeel::getComboBoxFont(juce::ComboBox&)
 {
-    return font(13.0f, true);
+    return mixerui::font(13.0f, mixerui::Weight::medium);
 }
 
 void MixerLookAndFeel::positionComboBoxText(juce::ComboBox& box, juce::Label& label)
 {
-    label.setBounds(4, 1, box.getWidth() - 30, box.getHeight() - 2);
+    label.setBounds(6, 1, box.getWidth() - 30, box.getHeight() - 2);
     label.setFont(getComboBoxFont(box));
     label.setJustificationType(juce::Justification::centredLeft);
+    label.setColour(juce::Label::textColourId, box.isEnabled() ? mixerui::ink : mixerui::muted);
 }
 
 juce::PopupMenu::Options MixerLookAndFeel::getOptionsForComboBoxPopupMenu(juce::ComboBox& box, juce::Label& label)
 {
-    return LookAndFeel_V3::getOptionsForComboBoxPopupMenu(box, label)
+    return LookAndFeel_V4::getOptionsForComboBoxPopupMenu(box, label)
         .withStandardItemHeight(menuItemHeight)
         .withMinimumWidth(box.getWidth());
 }
 
 juce::Font MixerLookAndFeel::getPopupMenuFont()
 {
-    return font(13.0f);
+    return mixerui::font(13.0f);
 }
 
 int MixerLookAndFeel::getPopupMenuBorderSize()
 {
-    return 4;
+    return 5;
 }
 
 void MixerLookAndFeel::drawPopupMenuBackground(juce::Graphics& graphics, int width, int height)
 {
     const auto area = juce::Rectangle<float>(0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height));
     graphics.fillAll(findColour(juce::PopupMenu::backgroundColourId));
-    graphics.setColour(mixerui::hairline);
+    graphics.setColour(mixerui::hairlineStrong);
     graphics.drawRect(area, 1.0f);
 }
 
@@ -149,10 +284,16 @@ void MixerLookAndFeel::drawPopupMenuItem(juce::Graphics& graphics, const juce::R
                                          bool hasSubMenu, const juce::String& text, const juce::String& shortcutKeyText,
                                          const juce::Drawable* icon, const juce::Colour* textColour)
 {
-    if (isSeparator || hasSubMenu || icon != nullptr || shortcutKeyText.isNotEmpty())
+    if (hasSubMenu || icon != nullptr)
     {
-        LookAndFeel_V3::drawPopupMenuItem(graphics, area, isSeparator, isActive, isHighlighted, isTicked,
+        LookAndFeel_V4::drawPopupMenuItem(graphics, area, isSeparator, isActive, isHighlighted, isTicked,
                                           hasSubMenu, text, shortcutKeyText, icon, textColour);
+        return;
+    }
+    if (isSeparator)
+    {
+        graphics.setColour(mixerui::hairline);
+        graphics.fillRect(area.reduced(10, 0).withSizeKeepingCentre(area.getWidth() - 20, 1));
         return;
     }
 
@@ -160,7 +301,7 @@ void MixerLookAndFeel::drawPopupMenuItem(juce::Graphics& graphics, const juce::R
     if (isHighlighted && isActive)
     {
         graphics.setColour(findColour(juce::PopupMenu::highlightedBackgroundColourId));
-        graphics.fillRoundedRectangle(row, menuCorner * 0.6f);
+        graphics.fillRoundedRectangle(row, 5.0f);
     }
 
     auto content = row.reduced(8.0f, 0.0f);
@@ -168,57 +309,60 @@ void MixerLookAndFeel::drawPopupMenuItem(juce::Graphics& graphics, const juce::R
     if (isTicked)
     {
         const auto centre = tickZone.getCentre();
-        graphics.setColour(mixerui::knobOutline);
-        graphics.fillEllipse(centre.x - 3.0f, centre.y - 3.0f, 6.0f, 6.0f);
+        juce::Path tick;
+        tick.startNewSubPath(centre.x - 4.0f, centre.y);
+        tick.lineTo(centre.x - 1.0f, centre.y + 3.0f);
+        tick.lineTo(centre.x + 4.5f, centre.y - 3.5f);
+        graphics.setColour(mixerui::ink);
+        graphics.strokePath(tick, juce::PathStrokeType(1.6f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
     }
 
     auto colour = textColour != nullptr ? *textColour : findColour(juce::PopupMenu::textColourId);
-    if (isHighlighted && isActive)
-        colour = findColour(juce::PopupMenu::highlightedTextColourId);
     graphics.setColour(colour.withMultipliedAlpha(isActive ? 1.0f : 0.45f));
-    graphics.setFont(isTicked ? font(13.0f, true) : getPopupMenuFont());
+    graphics.setFont(getPopupMenuFont());
+    if (shortcutKeyText.isNotEmpty())
+    {
+        graphics.setColour(mixerui::muted);
+        graphics.drawText(shortcutKeyText, content.toNearestInt(), juce::Justification::centredRight, false);
+        graphics.setColour(colour.withMultipliedAlpha(isActive ? 1.0f : 0.45f));
+    }
     graphics.drawFittedText(text, content.toNearestInt(), juce::Justification::centredLeft, 1);
 }
 
-juce::Label* MixerLookAndFeel::createSliderTextBox(juce::Slider& slider)
+void MixerLookAndFeel::drawPopupMenuColumnSeparatorWithOptions(juce::Graphics& graphics,
+                                                               const juce::Rectangle<int>& bounds,
+                                                               const juce::PopupMenu::Options&)
 {
-    auto* label = LookAndFeel_V3::createSliderTextBox(slider);
-    label->setFont(font(13.0f, true));
-    label->setJustificationType(juce::Justification::centred);
-    return label;
+    graphics.setColour(mixerui::hairline);
+    graphics.fillRect(bounds.withSizeKeepingCentre(1, bounds.getHeight() - 8));
 }
 
-void MixerLookAndFeel::drawLabel(juce::Graphics& graphics, juce::Label& label)
+juce::Rectangle<int> MixerLookAndFeel::getTooltipBounds(const juce::String& tipText, juce::Point<int> screenPos,
+                                                        juce::Rectangle<int> parentArea)
 {
-    if (dynamic_cast<juce::Slider*>(label.getParentComponent()) == nullptr)
-    {
-        LookAndFeel_V3::drawLabel(graphics, label);
-        return;
-    }
+    const auto layout = tooltipLayout(tipText);
+    const auto width = static_cast<int>(layout.getWidth() + 22.0f);
+    const auto height = static_cast<int>(layout.getHeight() + 14.0f);
+    return juce::Rectangle<int>(screenPos.x > parentArea.getCentreX() ? screenPos.x - (width + 12) : screenPos.x + 18,
+                                screenPos.y > parentArea.getCentreY() ? screenPos.y - (height + 6) : screenPos.y + 8,
+                                width, height)
+        .constrainedWithin(parentArea);
+}
 
-    // A slider's number box, drawn as the same rounded field as the combo box.
-    const auto alpha = label.isEnabled() ? 1.0f : 0.5f;
-    const auto area = label.getLocalBounds().toFloat().reduced(0.5f);
-    graphics.setColour(label.findColour(juce::Label::backgroundColourId).withMultipliedAlpha(alpha));
-    graphics.fillRoundedRectangle(area, fieldCorner);
-    graphics.setColour(label.findColour(juce::Label::outlineColourId).withMultipliedAlpha(alpha));
-    graphics.drawRoundedRectangle(area, fieldCorner, 1.0f);
-    if (label.isBeingEdited())
-        return;
-
-    graphics.setColour(label.findColour(juce::Label::textColourId).withMultipliedAlpha(alpha));
-    graphics.setFont(getLabelFont(label));
-    graphics.drawFittedText(label.getText(), getLabelBorderSize(label).subtractedFrom(label.getLocalBounds()),
-                            label.getJustificationType(), 1, label.getMinimumHorizontalScale());
+void MixerLookAndFeel::drawTooltip(juce::Graphics& graphics, const juce::String& text, int width, int height)
+{
+    const auto bounds = juce::Rectangle<float>(0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height));
+    graphics.setColour(findColour(juce::TooltipWindow::backgroundColourId));
+    graphics.fillRoundedRectangle(bounds, 6.0f);
+    tooltipLayout(text).draw(graphics, bounds.reduced(11.0f, 7.0f));
 }
 
 void MixerLookAndFeel::fillTextEditorBackground(juce::Graphics& graphics, int width, int height,
                                                 juce::TextEditor& editor)
 {
-    if (dynamic_cast<juce::AlertWindow*>(editor.getParentComponent()) != nullptr
-        || editor.isMultiLine())
+    if (editor.isMultiLine())
     {
-        LookAndFeel_V3::fillTextEditorBackground(graphics, width, height, editor);
+        graphics.fillAll(editor.findColour(juce::TextEditor::backgroundColourId));
         return;
     }
     graphics.setColour(editor.findColour(juce::TextEditor::backgroundColourId));
@@ -230,24 +374,29 @@ void MixerLookAndFeel::fillTextEditorBackground(juce::Graphics& graphics, int wi
 void MixerLookAndFeel::drawTextEditorOutline(juce::Graphics& graphics, int width, int height,
                                              juce::TextEditor& editor)
 {
-    if (dynamic_cast<juce::AlertWindow*>(editor.getParentComponent()) != nullptr
-        || editor.isMultiLine())
-    {
-        LookAndFeel_V3::drawTextEditorOutline(graphics, width, height, editor);
+    if (editor.isMultiLine())
         return;
-    }
     const auto focused = editor.hasKeyboardFocus(true) && !editor.isReadOnly();
-    graphics.setColour(focused ? mixerui::knobOutline : mixerui::hairline);
+    graphics.setColour(focused ? editor.findColour(juce::TextEditor::focusedOutlineColourId)
+                               : editor.findColour(juce::TextEditor::outlineColourId));
     graphics.drawRoundedRectangle(juce::Rectangle<float>(0.0f, 0.0f, static_cast<float>(width),
                                                          static_cast<float>(height)).reduced(0.5f),
                                   fieldCorner, focused ? 1.5f : 1.0f);
 }
 
-void mixerui::paintPlate(juce::Graphics& graphics, juce::Rectangle<int> bounds, float corner)
+void MixerLookAndFeel::drawScrollbar(juce::Graphics& graphics, juce::ScrollBar&, int x, int y, int width, int height,
+                                     bool isScrollbarVertical, int thumbStartPosition, int thumbSize,
+                                     bool isMouseOver, bool isMouseDown)
 {
-    const auto area = bounds.toFloat();
-    graphics.setColour(plate);
-    graphics.fillRoundedRectangle(area, corner);
-    graphics.setColour(hairline);
-    graphics.drawRoundedRectangle(area.reduced(0.5f), corner, 1.0f);
+    auto thumb = isScrollbarVertical
+        ? juce::Rectangle<int>(x, thumbStartPosition, width, thumbSize)
+        : juce::Rectangle<int>(thumbStartPosition, y, thumbSize, height);
+    thumb = thumb.reduced(isScrollbarVertical ? 3 : 2, isScrollbarVertical ? 2 : 3);
+    graphics.setColour(mixerui::slot.withAlpha(isMouseDown ? 1.0f : isMouseOver ? 0.9f : 0.7f));
+    graphics.fillRoundedRectangle(thumb.toFloat(), static_cast<float>(juce::jmin(thumb.getWidth(), thumb.getHeight())) * 0.5f);
+}
+
+int MixerLookAndFeel::getDefaultScrollbarWidth()
+{
+    return 11;
 }

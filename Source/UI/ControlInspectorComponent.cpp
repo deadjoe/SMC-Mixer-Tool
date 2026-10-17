@@ -1,813 +1,358 @@
 #include "ControlInspectorComponent.h"
 
-#include "MixerLookAndFeel.h"
-
 namespace
 {
-juce::String number(std::uint8_t value)
+juce::Colour familyColour(std::optional<ControlSelection> selection)
 {
-    return juce::String(static_cast<int>(value));
-}
-
-juce::String channel(std::uint8_t value)
-{
-    return "Channel " + juce::String(static_cast<int>(value) + 1);
-}
-
-juce::String namedValue(const char* name, std::uint8_t value)
-{
-    return name != nullptr ? juce::String(name) : number(value);
-}
-
-juce::String ccText(std::uint8_t value)
-{
-    return number(value) + " / " + controlChangeName(value);
-}
-
-juce::String ccCaption(std::uint8_t value)
-{
-    return juce::String::fromUTF8("CC  \xc2\xb7  ") + juce::String(controlChangeName(value)).toUpperCase();
-}
-
-// What each number field means for a type or mode, as measured on the mixer's Master port.
-struct FieldMeaning
-{
-    bool ccIsController = true;
-    juce::String ccName = "CC";
-    juce::String minimumName = "MIN";
-    juce::String maximumName = "MAX";
-    juce::String value1Name = "VALUE 1";
-    juce::String value2Name = "VALUE 2";
-    juce::String note;
-};
-
-const juce::String notUsed = juce::String::fromUTF8("CC  \xc2\xb7  NOT USED");
-
-FieldMeaning knobMeaning(std::uint8_t type)
-{
-    FieldMeaning meaning;
-    switch (type)
+    if (!selection)
+        return mixerui::hairlineStrong;
+    switch (selection->kind)
     {
-        case 0:
-            meaning.note = "Sends the CC with a value that moves between Min and Max.";
-            break;
-        case 1:
-            meaning.ccIsController = false;
-            meaning.ccName = notUsed;
-            meaning.note = "Sends Channel Pressure between Min and Max. No CC number is sent.";
-            break;
-        case 2:
-            meaning.ccIsController = false;
-            meaning.ccName = notUsed;
-            meaning.note = "Like a Mackie fader: Note On 104 plus the channel number on channel 1 while turning, "
-                           "and Pitch Bend on this channel. No CC number is sent.";
-            break;
-        case 3:
-            meaning.minimumName = "CCW VALUE";
-            meaning.maximumName = "CW VALUE";
-            meaning.note = "Each step sends the CC with the CW or CCW value. Use 1 and 127 for two's complement, "
-                           "or 65 and 63 for binary offset.";
-            break;
-        default:
-            break;
+        case ControlKind::knob: return mixerui::knob;
+        case ControlKind::slider: return mixerui::fader;
+        case ControlKind::trackButton: return mixerui::trackButton;
+        case ControlKind::globalButton: return mixerui::globalButton;
     }
-    return meaning;
+    return mixerui::hairlineStrong;
 }
 
-FieldMeaning sliderMeaning(std::uint8_t type)
+juce::String kindCaption(ControlSelection selection)
 {
-    FieldMeaning meaning;
-    switch (type)
+    switch (selection.kind)
     {
-        case 0:
-            meaning.note = "Sends the CC with a value between Min and Max.";
-            break;
-        case 1:
-            meaning.ccIsController = false;
-            meaning.ccName = notUsed;
-            meaning.note = "Sends Channel Pressure between Min and Max. No CC number is sent.";
-            break;
-        case 2:
-            meaning.ccIsController = false;
-            meaning.ccName = notUsed;
-            meaning.note = "Sends Pitch Bend on the channel, as a Mackie fader does. No CC number is sent.";
-            break;
-        default:
-            break;
+        case ControlKind::knob: return "Knob";
+        case ControlKind::slider: return "Fader";
+        case ControlKind::trackButton: return "Track key";
+        case ControlKind::globalButton: return "Transport key";
     }
-    return meaning;
+    return {};
 }
 
-FieldMeaning buttonMeaning(std::uint8_t mode)
+void styleCaption(juce::Label& label)
 {
-    const auto dot = juce::String::fromUTF8("  \xc2\xb7  ");
-    FieldMeaning meaning;
-    switch (mode)
-    {
-        case 0:
-            meaning.value1Name = "VALUE 1" + dot + "PRESS";
-            meaning.value2Name = "VALUE 2" + dot + "NOT USED";
-            meaning.note = "Sends Value 1 once on each press. Nothing is sent on release.";
-            break;
-        case 1:
-            meaning.value1Name = "VALUE 1" + dot + "OFF";
-            meaning.value2Name = "VALUE 2" + dot + "ON";
-            meaning.note = "Each press alternates between Value 2 and Value 1.";
-            break;
-        case 2:
-            meaning.value1Name = "VALUE 1" + dot + "RELEASE";
-            meaning.value2Name = "VALUE 2" + dot + "PRESS";
-            meaning.note = "Sends Value 2 on press and Value 1 on release.";
-            break;
-        case 3:
-            meaning.ccIsController = false;
-            meaning.ccName = "BANK MSB";
-            meaning.value1Name = "BANK LSB";
-            meaning.value2Name = "PROGRAM";
-            meaning.note = "Each press sends Bank Select MSB, Bank Select LSB, then Program Change.";
-            break;
-        case 4:
-            meaning.ccIsController = false;
-            meaning.ccName = notUsed;
-            meaning.value1Name = "VALUE 1" + dot + "NOT USED";
-            meaning.value2Name = "VALUE 2" + dot + "NOT USED";
-            meaning.note = "Each press sends the stored message.";
-            break;
-        case 5:
-            meaning.ccIsController = false;
-            meaning.ccName = "NOTE";
-            meaning.value1Name = "VALUE 1" + dot + "NOT USED";
-            meaning.value2Name = "VALUE 2" + dot + "NOT USED";
-            meaning.note = "Sends Note On at velocity 127 on press and at velocity 0 on release.";
-            break;
-        default:
-            break;
-    }
-    return meaning;
+    label.setFont(mixerui::captionFont(9.5f));
+    label.setColour(juce::Label::textColourId, mixerui::muted);
+    label.setBorderSize({ 0, 2, 0, 2 });
+    label.setMinimumHorizontalScale(0.8f);
 }
 
-bool wholeNumber(const juce::String& text, int minimum, int maximum, int& parsed)
+void styleHelper(juce::Label& label)
 {
-    const auto trimmed = text.trim();
-    if (trimmed.isEmpty() || trimmed.length() > 3 || !trimmed.containsOnly("0123456789"))
-        return false;
-    parsed = trimmed.getIntValue();
-    return parsed >= minimum && parsed <= maximum;
+    label.setFont(mixerui::font(10.5f));
+    label.setColour(juce::Label::textColourId, mixerui::muted);
+    label.setBorderSize({ 0, 2, 0, 2 });
+    label.setMinimumHorizontalScale(0.8f);
 }
-
-juce::String hexBytes(const Bytes& bytes)
-{
-    juce::String text;
-    for (const auto byte : bytes)
-    {
-        if (text.isNotEmpty())
-            text += " ";
-        text += juce::String::toHexString(static_cast<int>(byte)).paddedLeft('0', 2).toUpperCase();
-    }
-    return text;
-}
-
-constexpr int profileRadioGroupId = 1;
-
 }
 
 ControlInspectorComponent::ControlInspectorComponent()
 {
-    titleLabel.setText("SELECTED CONTROL", juce::dontSendNotification);
-    titleLabel.setFont(MixerLookAndFeel::font(10.0f, true));
-    titleLabel.setColour(juce::Label::textColourId, mixerui::muted);
-    selectionLabel.setFont(MixerLookAndFeel::font(22.0f, true));
-    selectionLabel.setColour(juce::Label::textColourId, mixerui::ink);
-    statusLabel.setFont(MixerLookAndFeel::font(11.0f));
-    statusLabel.setColour(juce::Label::textColourId, mixerui::muted);
-    statusLabel.setMinimumHorizontalScale(0.6f);
-    addAndMakeVisible(titleLabel);
-    addAndMakeVisible(selectionLabel);
-    addAndMakeVisible(statusLabel);
+    using namespace mixerui;
+    kindLabel.setFont(captionFont(9.5f));
+    kindLabel.setColour(juce::Label::textColourId, muted);
+    titleLabel.setFont(font(19.0f, Weight::semibold));
+    titleLabel.setColour(juce::Label::textColourId, ink);
+    note.setFont(font(12.0f));
+    note.setColour(juce::Label::textColourId, inkSoft);
+    note.setJustificationType(juce::Justification::topLeft);
+    note.setMinimumHorizontalScale(1.0f);
+    readOnlyBadge.setText("READ ONLY", juce::dontSendNotification);
+    readOnlyBadge.setFont(captionFont(9.0f));
+    readOnlyBadge.setColour(juce::Label::textColourId, inkSoft);
+    readOnlyBadge.setJustificationType(juce::Justification::centred);
+    for (auto* label : { &kindLabel, &titleLabel, &note, &readOnlyBadge })
+    {
+        label->setBorderSize({});
+        addAndMakeVisible(*label);
+    }
+    readOnlyBadge.setTooltip("The DAW profile is shown as stored. Switch to CC / User to edit.");
 
-    const auto showProfile = [this](DeviceProfile profile) {
-        if (activeProfile == profile)
-            return;
-        activeProfile = profile;
-        updateProfileButtons();
-        refreshFields();
+    revert.setTooltip(juce::String::fromUTF8("Restore this control as it was read from the mixer (\xe2\x8c\x98\xe2\x8c\xab)."));
+    revert.onClick = [this] {
+        if (onRevertRequested && current.selection)
+            onRevertRequested(*current.selection, current.profileKind);
     };
-    ccUserButton.setClickingTogglesState(true);
-    dawButton.setClickingTogglesState(true);
-    ccUserButton.setRadioGroupId(profileRadioGroupId);
-    dawButton.setRadioGroupId(profileRadioGroupId);
-    ccUserButton.setConnectedEdges(juce::Button::ConnectedOnRight);
-    dawButton.setConnectedEdges(juce::Button::ConnectedOnLeft);
-    ccUserButton.setMouseClickGrabsKeyboardFocus(false);
-    dawButton.setMouseClickGrabsKeyboardFocus(false);
-    const auto profileTooltip = juce::String("Shows the stored profile you are viewing. The mixer's live mode is unchanged.");
-    ccUserButton.setTooltip(profileTooltip);
-    dawButton.setTooltip(profileTooltip);
-    ccUserButton.onClick = [showProfile] { showProfile(DeviceProfile::ccUser); };
-    dawButton.onClick = [showProfile] { showProfile(DeviceProfile::daw); };
-    revertButton.onClick = [this] {
-        if (onRevertRequested && hasSelection)
-            onRevertRequested(selected, activeProfile);
-    };
-    writeButton.onClick = [this] { if (onWriteRequested) onWriteRequested(); };
-    exportButton.onClick = [this] { exportProfile(); };
-    copyButton.onClick = [this] { copyProfile(); };
-    revertButton.setTooltip("Restore this control in the profile you are viewing.");
-    writeButton.setTooltip("Write changed CC / User records, read them back, and save them on the mixer.");
-    exportButton.setTooltip("Save the profile you are viewing as a JSON file.");
-    copyButton.setTooltip("Copy the profile you are viewing to the clipboard as JSON.");
-    addAndMakeVisible(ccUserButton);
-    addAndMakeVisible(dawButton);
-    addAndMakeVisible(revertButton);
-    addAndMakeVisible(writeButton);
-    addAndMakeVisible(exportButton);
-    addAndMakeVisible(copyButton);
+    addAndMakeVisible(revert);
+    readButton.onClick = [this] { if (onReadRequested) onReadRequested(); };
+    addChildComponent(readButton);
 
-    for (int index = 0; index < 6; ++index)
-    {
-        auto& name = fieldNames[static_cast<std::size_t>(index)];
-        auto& value = fieldValues[static_cast<std::size_t>(index)];
-        name.setFont(MixerLookAndFeel::font(10.0f, true));
-        name.setColour(juce::Label::textColourId, mixerui::muted);
-        name.setMinimumHorizontalScale(0.7f);
-        value.setFont(MixerLookAndFeel::font(14.0f, true));
-        value.setMinimumHorizontalScale(0.55f);
-        addAndMakeVisible(name);
-        addAndMakeVisible(value);
-
-        auto& editor = editors[static_cast<std::size_t>(index)];
-        editor.setSliderStyle(juce::Slider::LinearHorizontal);
-        editor.setTextBoxStyle(juce::Slider::TextBoxRight, false, 56, MixerLookAndFeel::fieldHeight);
-        editor.setScrollWheelEnabled(true);
-        editor.setSliderSnapsToMousePosition(true);
-        editor.setDoubleClickReturnValue(false, 0.0);
-        editor.setPopupDisplayEnabled(false, false, nullptr);
-        editor.setColour(juce::Slider::backgroundColourId, juce::Colours::transparentBlack);
-        editor.setColour(juce::Slider::trackColourId, mixerui::slot);
-        editor.setColour(juce::Slider::thumbColourId, mixerui::knobOutline);
-        editor.setColour(juce::Slider::textBoxTextColourId, mixerui::ink);
-        editor.setColour(juce::Slider::textBoxBackgroundColourId, mixerui::shell);
-        editor.setColour(juce::Slider::textBoxOutlineColourId, mixerui::hairline);
-        editor.setRange(0.0, 127.0, 1.0);
-        editor.onValueChange = [this, index] { handleEditor(index); };
-        editor.setVisible(false);
-        addAndMakeVisible(editor);
-    }
-
-    choiceBox.setVisible(false);
-    choiceBox.setMouseCursor(juce::MouseCursor::PointingHandCursor);
-    choiceBox.onChange = [this] {
-        if (suppressChoiceCallbacks || !choiceField || !onControlEdited || !hasSelection)
+    styleCaption(choiceCaption);
+    styleHelper(choiceHelper);
+    addAndMakeVisible(choiceCaption);
+    addAndMakeVisible(choiceHelper);
+    choice.setMouseCursor(juce::MouseCursor::PointingHandCursor);
+    choice.onChange = [this] {
+        if (updating || !current.selection || choice.getSelectedId() <= 0)
             return;
-        const auto selectedId = choiceBox.getSelectedId();
-        if (selectedId <= 0)
-            return;
-        onControlEdited(selected, activeProfile, *choiceField, static_cast<std::uint8_t>(selectedId - 1));
-        // A new type or mode changes what the other fields mean. Relabel once the combo box has settled.
-        juce::MessageManager::callAsync([safe = juce::Component::SafePointer<ControlInspectorComponent>(this)] {
-            if (safe != nullptr)
-                safe->refreshFields();
-        });
+        edit(isButton(current.selection->kind) ? EditableField::mode : EditableField::type, choice.getSelectedId() - 1, false);
     };
-    addAndMakeVisible(choiceBox);
+    addAndMakeVisible(choice);
 
-    updateProfileButtons();
-    clearConfiguration();
-}
-
-void ControlInspectorComponent::updateProfileButtons()
-{
-    ccUserButton.setToggleState(activeProfile == DeviceProfile::ccUser, juce::dontSendNotification);
-    dawButton.setToggleState(activeProfile == DeviceProfile::daw, juce::dontSendNotification);
-}
-
-void ControlInspectorComponent::showNotice(const juce::String& message, juce::Colour colour)
-{
-    statusLabel.setColour(juce::Label::textColourId, colour);
-    statusLabel.setText(message, juce::dontSendNotification);
-    statusLabel.setTooltip(message);
-}
-
-void ControlInspectorComponent::copyProfile()
-{
-    if (!configuration)
-        return;
-    const auto json = mixerui::utf8(configuration->toJson(activeProfile));
-    juce::SystemClipboard::copyTextToClipboard(json);
-    const juce::String name = activeProfile == DeviceProfile::ccUser ? "CC / User" : "DAW";
-    showNotice("Copied the " + name + " profile to the clipboard.", mixerui::success);
-}
-
-void ControlInspectorComponent::exportProfile()
-{
-    if (!configuration)
-        return;
-
-    const juce::String name = activeProfile == DeviceProfile::ccUser ? "CC / User" : "DAW";
-    const auto fileName = activeProfile == DeviceProfile::ccUser
-        ? juce::String("SMC-Mixer-CC-User.json") : juce::String("SMC-Mixer-DAW.json");
-    const auto initialFile = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory).getChildFile(fileName);
-    const auto json = mixerui::utf8(configuration->toJson(activeProfile));
-    fileChooser = std::make_unique<juce::FileChooser>("Export " + juce::String(name) + " profile", initialFile, "*.json");
-    fileChooser->launchAsync(juce::FileBrowserComponent::saveMode
-                                 | juce::FileBrowserComponent::canSelectFiles
-                                 | juce::FileBrowserComponent::warnAboutOverwriting,
-                             [safe = juce::Component::SafePointer<ControlInspectorComponent>(this), json, name](const juce::FileChooser& chooser) {
-                                 if (safe == nullptr)
-                                     return;
-                                 const auto file = chooser.getResult();
-                                 safe->fileChooser.reset();
-                                 if (file == juce::File())
-                                     return;
-                                 if (file.replaceWithText(json))
-                                 {
-                                     safe->showNotice("Exported the " + name + " profile.", mixerui::success);
-                                     safe->statusLabel.setTooltip(file.getFullPathName());
-                                 }
-                                 else
-                                 {
-                                     safe->showNotice("Could not write the file. Check the location and permissions.",
-                                                      mixerui::error);
-                                 }
-                             });
-}
-
-void ControlInspectorComponent::selectControl(ControlSelection selection)
-{
-    selected = selection;
-    hasSelection = true;
-    refreshFields();
-    repaint();
-
-    if (!configuration && !loading && !writing && onSettingsRequired)
-        onSettingsRequired();
-}
-
-void ControlInspectorComponent::setConfiguration(const ControlConfiguration& newConfiguration)
-{
-    configuration = newConfiguration;
-    readError.clear();
-    loading = false;
-    writing = false;
-    refreshFields();
-}
-
-void ControlInspectorComponent::cacheConfiguration(const ControlConfiguration& newConfiguration)
-{
-    configuration = newConfiguration;
-    readError.clear();
-    updateStatus();
-    updateActionButtons();
-}
-
-void ControlInspectorComponent::setDirtyControls(const std::vector<ControlSelection>& dirty)
-{
-    dirtyControls = dirty;
-    updateStatus();
-    updateActionButtons();
-}
-
-void ControlInspectorComponent::setEditingEnabled(bool enabled)
-{
-    editingEnabled = enabled;
-}
-
-void ControlInspectorComponent::clearConfiguration()
-{
-    configuration.reset();
-    dirtyControls.clear();
-    readError.clear();
-    loading = false;
-    writing = false;
-    loadProgress = 0.0;
-    writeProgress = 0.0;
-    refreshFields();
-}
-
-void ControlInspectorComponent::setLoading(bool shouldBeLoading, double progress)
-{
-    loading = shouldBeLoading;
-    loadProgress = progress;
-    if (shouldBeLoading)
+    for (auto& entry : slots)
     {
-        writing = false;
-        readError.clear();
-    }
-    refreshFields();
-}
-
-void ControlInspectorComponent::setWriting(bool shouldBeWriting, double progress)
-{
-    writeProgress = progress;
-    const auto changed = writing != shouldBeWriting;
-    writing = shouldBeWriting;
-    if (shouldBeWriting)
-    {
-        loading = false;
-        readError.clear();
-    }
-    if (changed)
-        refreshFields();
-    else
-    {
-        updateStatus();
-        updateActionButtons();
-    }
-}
-
-void ControlInspectorComponent::setReadError(const juce::String& message)
-{
-    loading = false;
-    writing = false;
-    loadProgress = 0.0;
-    writeProgress = 0.0;
-    readError = message;
-    refreshFields();
-}
-
-void ControlInspectorComponent::hideFields()
-{
-    for (int index = 0; index < 6; ++index)
-    {
-        setField(index, {}, {}, false);
-        editors[static_cast<std::size_t>(index)].setVisible(false);
-        editorFields[static_cast<std::size_t>(index)].reset();
-    }
-    choiceBox.setVisible(false);
-    choiceField.reset();
-}
-
-void ControlInspectorComponent::setField(int index, const juce::String& name, const juce::String& value, bool visible)
-{
-    auto& nameLabel = fieldNames[static_cast<std::size_t>(index)];
-    auto& valueLabel = fieldValues[static_cast<std::size_t>(index)];
-    nameLabel.setText(name, juce::dontSendNotification);
-    valueLabel.setText(value, juce::dontSendNotification);
-    nameLabel.setVisible(visible);
-    valueLabel.setVisible(visible);
-}
-
-void ControlInspectorComponent::setChoice(int index,
-                                          const juce::String& name,
-                                          EditableField field,
-                                          std::uint8_t value,
-                                          const std::vector<std::uint8_t>& values,
-                                          const juce::String& tooltip)
-{
-    auto& nameLabel = fieldNames[static_cast<std::size_t>(index)];
-    auto& valueLabel = fieldValues[static_cast<std::size_t>(index)];
-    nameLabel.setText(name, juce::dontSendNotification);
-    nameLabel.setVisible(true);
-    valueLabel.setVisible(false);
-    editors[static_cast<std::size_t>(index)].setVisible(false);
-    editorFields[static_cast<std::size_t>(index)].reset();
-
-    suppressChoiceCallbacks = true;
-    choiceBox.clear(juce::dontSendNotification);
-    bool listed = false;
-    for (const auto option : values)
-    {
-        const char* label = field == EditableField::mode ? buttonModeName(option)
-            : selected.kind == ControlKind::slider ? sliderTypeName(option)
-                                                    : knobTypeName(option);
-        choiceBox.addItem(namedValue(label, option), static_cast<int>(option) + 1);
-        listed = listed || option == value;
-    }
-    if (!listed)
-        choiceBox.addItem(number(value), static_cast<int>(value) + 1);
-    choiceBox.setSelectedId(static_cast<int>(value) + 1, juce::dontSendNotification);
-    choiceBox.setTooltip(tooltip);
-    choiceBox.setEnabled(!writing);
-    choiceBox.setVisible(true);
-    choiceField = field;
-    choiceIndex = index;
-    suppressChoiceCallbacks = false;
-    choiceBox.setBounds(editors[static_cast<std::size_t>(index)].getBounds());
-}
-
-void ControlInspectorComponent::setEditor(int index,
-                                          const juce::String& name,
-                                          EditableField field,
-                                          std::uint8_t value,
-                                          int maximum,
-                                          bool asChannel)
-{
-    auto& nameLabel = fieldNames[static_cast<std::size_t>(index)];
-    auto& valueLabel = fieldValues[static_cast<std::size_t>(index)];
-    auto& editor = editors[static_cast<std::size_t>(index)];
-    nameLabel.setText(name, juce::dontSendNotification);
-    nameLabel.setVisible(true);
-    valueLabel.setVisible(false);
-    editorFields[static_cast<std::size_t>(index)] = field;
-
-    suppressEditorCallbacks = true;
-    editor.setRange(0.0, static_cast<double>(maximum), 1.0);
-    const auto low = asChannel ? 1 : 0;
-    const auto high = asChannel ? maximum + 1 : maximum;
-    const auto rangeText = juce::String(low) + "-" + juce::String(high);
-    editor.setTitle(name + " (" + rangeText + ")");
-    editor.setTooltip("Whole number from " + juce::String(low) + " to " + juce::String(high) + ".");
-    if (asChannel)
-    {
-        editor.textFromValueFunction = [](double current) {
-            return juce::String(juce::roundToInt(current) + 1);
+        styleCaption(entry.caption);
+        styleHelper(entry.helper);
+        addAndMakeVisible(entry.caption);
+        addAndMakeVisible(entry.helper);
+        addAndMakeVisible(entry.number);
+        entry.number.onValueChange = [this, &entry](int value, bool continuing) {
+            if (!updating && entry.field)
+                edit(*entry.field, value, continuing);
+        };
+        entry.number.onInvalidInput = [this](const juce::String& message) {
+            if (onNotice)
+                onNotice(message, mixerui::Tone::warning);
         };
     }
+
+    show({});
+}
+
+void ControlInspectorComponent::edit(EditableField field, int value, bool continuing)
+{
+    if (onControlEdited && current.selection)
+        onControlEdited(*current.selection, current.profileKind, field, static_cast<std::uint8_t>(value), continuing);
+}
+
+NumberField* ControlInspectorComponent::numberFieldFor(EditableField field)
+{
+    for (auto& slot : slots)
+        if (slot.visible && slot.field == field)
+            return &slot.number;
+    return nullptr;
+}
+
+void ControlInspectorComponent::configureChoice(ControlKind kind)
+{
+    // Track and global keys share their modes, so their list only changes with the family.
+    const auto family = isButton(kind) ? ControlKind::trackButton : kind;
+    if (choiceKind == family)
+        return;
+    choiceKind = family;
+    choice.clear(juce::dontSendNotification);
+    if (family == ControlKind::knob)
+        for (std::uint8_t type = 0; type < knobTypeCount; ++type)
+            choice.addItem(knobTypeName(type), type + 1);
+    else if (family == ControlKind::slider)
+        for (std::uint8_t type = 0; type < sliderTypeCount; ++type)
+            choice.addItem(sliderTypeName(type), type + 1);
+    else
+        for (std::uint8_t mode = 0; mode < buttonModeCount; ++mode)
+            choice.addItem(buttonModeName(mode), mode + 1);
+}
+
+void ControlInspectorComponent::hideSlot(int index)
+{
+    auto& slot = slots[static_cast<std::size_t>(index)];
+    slot.visible = false;
+    slot.field.reset();
+    slot.caption.setVisible(false);
+    slot.helper.setVisible(false);
+    slot.number.setVisible(false);
+}
+
+void ControlInspectorComponent::showNumber(int index, EditableField field, const juce::String& caption,
+                                           const juce::String& helper, bool used, int displayOffset, bool listed)
+{
+    auto& slot = slots[static_cast<std::size_t>(index)];
+    const auto& profile = *current.profile;
+    const auto selection = *current.selection;
+    const auto value = static_cast<int>(fieldValue(profile, selection, field));
+    auto range = allowedRange(profile, selection, field);
+    // A stored value outside the limits is shown as it is, with a warning outline.
+    range.minimum = juce::jmin(range.minimum, value);
+    range.maximum = juce::jmax(range.maximum, value);
+
+    slot.visible = true;
+    slot.field = field;
+    slot.caption.setText(caption.toUpperCase(), juce::dontSendNotification);
+    slot.caption.setColour(juce::Label::textColourId, used ? mixerui::muted : mixerui::faint);
+    slot.helper.setText(helper, juce::dontSendNotification);
+    slot.number.setRange(range.minimum, range.maximum);
+    slot.number.setDisplayOffset(displayOffset);
+    slot.number.setValue(value);
+    slot.number.setEditable(current.editable);
+    slot.number.setEnabled(used || !current.editable);
+    slot.number.setShowsList(listed);
+    slot.number.setAccent(familyColour(current.selection).darker(0.2f));
+    slot.number.setTitle(caption);
+    slot.number.setTooltip({});
+    if (field == EditableField::cc && listed)
+        slot.number.itemName = [](int cc) { return juce::String(controlChangeName(static_cast<std::uint8_t>(cc))); };
+    else
+        slot.number.itemName = nullptr;
+    slot.caption.setVisible(true);
+    slot.helper.setVisible(true);
+    slot.number.setVisible(true);
+}
+
+void ControlInspectorComponent::showReadOnly(int index, const juce::String& caption, int value, const juce::String& helper)
+{
+    auto& slot = slots[static_cast<std::size_t>(index)];
+    slot.visible = true;
+    slot.field.reset();
+    slot.caption.setText(caption.toUpperCase(), juce::dontSendNotification);
+    slot.caption.setColour(juce::Label::textColourId, mixerui::muted);
+    slot.helper.setText(helper, juce::dontSendNotification);
+    slot.number.itemName = nullptr;
+    slot.number.setShowsList(false);
+    slot.number.setDisplayOffset(0);
+    slot.number.setRange(value, value);
+    slot.number.setValue(value);
+    slot.number.setEditable(false);
+    slot.number.setEnabled(true);
+    slot.number.setTitle(caption);
+    slot.caption.setVisible(true);
+    slot.helper.setVisible(true);
+    slot.number.setVisible(true);
+}
+
+void ControlInspectorComponent::show(const View& view)
+{
+    const juce::ScopedValueSetter<bool> guard(updating, true);
+    current = view;
+
+    const auto hasSelection = view.selection.has_value() && isValidControl(*view.selection);
+    const auto ready = hasSelection && view.profile != nullptr;
+    kindLabel.setText(hasSelection ? kindCaption(*view.selection).toUpperCase() : juce::String("SELECTED CONTROL"),
+                      juce::dontSendNotification);
+    titleLabel.setText(hasSelection ? mixerui::utf8(controlDisplayName(*view.selection)) : juce::String("Select a control"),
+                       juce::dontSendNotification);
+    readOnlyBadge.setVisible(ready && view.profileKind == DeviceProfile::daw);
+    revert.setVisible(ready && view.profileKind == DeviceProfile::ccUser);
+    revert.setEnabled(view.selectionDirty && view.editable);
+    readButton.setVisible(view.profile == nullptr && view.offerRead);
+
+    if (view.profile == nullptr)
+        note.setText(view.emptyMessage, juce::dontSendNotification);
+    else if (!hasSelection)
+        note.setText("Click a knob, fader, or key on the panel, or move between them with the arrow keys.",
+                     juce::dontSendNotification);
+    else
+        note.setText(mixerui::utf8(controlNote(*view.profile, *view.selection)), juce::dontSendNotification);
+
+    choice.setVisible(ready);
+    choiceCaption.setVisible(ready);
+    choiceHelper.setVisible(ready);
+    if (!ready)
+    {
+        for (int index = 0; index < slotCount - 1; ++index)
+            hideSlot(index);
+        resized();
+        repaint();
+        return;
+    }
+
+    const auto& profile = *view.profile;
+    const auto selection = *view.selection;
+    const auto meaning = meaningFor(profile, selection);
+    const auto button = isButton(selection.kind);
+    const auto code = fieldValue(profile, selection, button ? EditableField::mode : EditableField::type);
+
+    configureChoice(selection.kind);
+    choiceCaption.setText(button ? "MODE" : "TYPE", juce::dontSendNotification);
+    if (choice.indexOfItemId(code + 1) < 0)
+        choice.addItem("Unknown (" + juce::String(code) + ")", code + 1);
+    choice.setSelectedId(code + 1, juce::dontSendNotification);
+    choice.setEnabled(view.editable);
+    choice.setTooltip(button ? "What the key sends. Value 1 and Value 2 stay on the key when the mode changes."
+                             : "What the control sends.");
+    choiceHelper.setText(selection.kind == ControlKind::knob && code == knobTypeRelative ? juce::String("Midi Suite calls it CW")
+                         : selection.kind == ControlKind::knob && code == 0           ? juce::String("Midi Suite calls it CC")
+                                                                                       : juce::String(),
+                         juce::dontSendNotification);
+
+    const auto cc = fieldValue(profile, selection, EditableField::cc);
+    const auto ccHelper = meaning.ccIsController ? juce::String(controlChangeName(cc))
+                        : meaning.ccUsed         ? juce::String()
+                                                 : juce::String("Not sent");
+    showNumber(0, EditableField::channel, "Channel", {}, true, 1, true);
+    showNumber(1, EditableField::cc, meaning.ccUsed ? mixerui::utf8(meaning.ccName) : juce::String("CC"), ccHelper,
+               meaning.ccUsed, 0, meaning.ccIsController);
+
+    if (button)
+    {
+        showNumber(2, EditableField::value1, mixerui::utf8(meaning.value1Name),
+                   meaning.value1Used ? juce::String() : juce::String("Not sent"), meaning.value1Used, 0, false);
+        showNumber(3, EditableField::value2, mixerui::utf8(meaning.value2Name),
+                   meaning.value2Used ? juce::String() : juce::String("Not sent"), meaning.value2Used, 0, false);
+        showNumber(4, EditableField::led, "LED", "Raw byte, not measured", true, 0, false);
+        slots[4].number.setTooltip("The stored LED byte, 0 to 255. What each value does has not been measured yet.");
+    }
     else
     {
-        editor.textFromValueFunction = nullptr;
-    }
-    editor.valueFromTextFunction = [this, index, low, high, asChannel](const juce::String& text) {
-        auto& currentEditor = editors[static_cast<std::size_t>(index)];
-        int parsed = 0;
-        if (!wholeNumber(text, low, high, parsed))
+        const auto relative = isRelativeKnob(profile, selection);
+        const auto rangeHelper = !meaning.rangeUsed ? juce::String("Not sent")
+                               : relative           ? juce::String("Sent on each step")
+                                                    : juce::String();
+        showNumber(2, EditableField::minimum, mixerui::utf8(meaning.minimumName), rangeHelper, meaning.rangeUsed, 0, false);
+        showNumber(3, EditableField::maximum, mixerui::utf8(meaning.maximumName), rangeHelper, meaning.rangeUsed, 0, false);
+        if (selection.kind == ControlKind::knob)
         {
-            statusLabel.setColour(juce::Label::textColourId, mixerui::warning);
-            statusLabel.setText("Enter a whole number from " + juce::String(low) + " to " + juce::String(high) + ".",
-                                juce::dontSendNotification);
-            return currentEditor.getValue();
+            showReadOnly(4, "Speed", profile.knobs[static_cast<std::size_t>(selection.index)].speed, "Not measured, read-only");
+            slots[4].number.setTooltip("The stored speed byte. What it changes has not been measured, so it is shown read-only.");
         }
-        return static_cast<double>(asChannel ? parsed - 1 : parsed);
-    };
-    editor.setValue(static_cast<double>(value), juce::dontSendNotification);
-    // setValue() leaves the text alone when the value is unchanged, so a channel would still show 0.
-    editor.updateText();
-    editor.setEnabled(!writing);
-    editor.setVisible(true);
-    suppressEditorCallbacks = false;
-}
-
-void ControlInspectorComponent::handleEditor(int index)
-{
-    if (suppressEditorCallbacks || !onControlEdited || !hasSelection)
-        return;
-    const auto& field = editorFields[static_cast<std::size_t>(index)];
-    if (!field)
-        return;
-    const auto value = static_cast<std::uint8_t>(juce::roundToInt(editors[static_cast<std::size_t>(index)].getValue()));
-    if (*field == EditableField::cc && ccIsController)
-        fieldNames[static_cast<std::size_t>(index)].setText(ccCaption(value), juce::dontSendNotification);
-    onControlEdited(selected, activeProfile, *field, value);
-}
-
-bool ControlInspectorComponent::selectedRecordDirty() const
-{
-    return hasSelection && isRecordDirty && isRecordDirty(selected, activeProfile);
-}
-
-bool ControlInspectorComponent::anyDirty() const
-{
-    return !dirtyControls.empty();
-}
-
-void ControlInspectorComponent::updateActionButtons()
-{
-    const auto profileReady = configuration.has_value() && !loading && !writing;
-    revertButton.setEnabled(selectedRecordDirty() && !loading && !writing);
-    writeButton.setEnabled(anyDirty() && editingEnabled && profileReady);
-    exportButton.setEnabled(profileReady);
-    copyButton.setEnabled(profileReady);
-    ccUserButton.setEnabled(profileReady);
-    dawButton.setEnabled(profileReady);
-}
-
-void ControlInspectorComponent::updateStatus()
-{
-    const auto show = [this](const juce::String& text, juce::Colour colour) {
-        statusLabel.setColour(juce::Label::textColourId, colour);
-        statusLabel.setText(text, juce::dontSendNotification);
-    };
-
-    if (writing)
-    {
-        const auto percent = juce::roundToInt(juce::jlimit(0.0, 1.0, writeProgress) * 100.0);
-        show("Writing, checking, and saving changed records... " + juce::String(percent) + "%", mixerui::ink);
-        return;
-    }
-    if (loading)
-    {
-        const auto percent = juce::roundToInt(juce::jlimit(0.0, 1.0, loadProgress) * 100.0);
-        show("Reading the 6,282-byte settings snapshot from the device... " + juce::String(percent) + "%",
-             mixerui::ink);
-        return;
-    }
-    if (!configuration)
-    {
-        show(readError.isNotEmpty()
-                 ? readError
-                 : hasSelection ? "Configuration is not loaded. Select the control again to retry."
-                                : "Select any hardware control to read its configuration.",
-             readError.isNotEmpty() ? mixerui::error : mixerui::muted);
-        return;
-    }
-    if (readError.isNotEmpty())
-    {
-        show(readError, mixerui::error);
-        return;
-    }
-
-    juce::String text;
-    if (activeProfile == DeviceProfile::daw)
-    {
-        text = "Stored DAW profile. This view is read-only.";
-        if (hasSelection && (selected.kind == ControlKind::trackButton || selected.kind == ControlKind::globalButton))
-        {
-            const auto buttonIndex = selected.kind == ControlKind::trackButton ? selected.index : selected.index + 32;
-            const auto& message = configuration->profile(DeviceProfile::daw).buttons[static_cast<std::size_t>(buttonIndex)].dawMessage;
-            if (!message.empty())
-                text += " Message " + hexBytes(message) + ".";
-        }
-        if (anyDirty())
-            text += " CC / User still has unsaved edits.";
-    }
-    else if (selectedRecordDirty())
-    {
-        text = "Unsaved edits on this control. Write sends changed records only.";
-    }
-    else if (anyDirty())
-    {
-        text = "Unsaved edits on other controls. Write sends changed records only.";
-    }
-    else
-    {
-        text = "Stored CC / User profile. Edits stay here until you write them.";
-    }
-    if (activeProfile == DeviceProfile::ccUser && hasSelection)
-    {
-        const auto& profile = configuration->profile(DeviceProfile::ccUser);
-        if (selected.kind == ControlKind::knob)
-            text = knobMeaning(profile.knobs[static_cast<std::size_t>(selected.index)].type).note + " " + text;
-        else if (selected.kind == ControlKind::slider)
-            text = sliderMeaning(profile.sliders[static_cast<std::size_t>(selected.index)].type).note + " " + text;
         else
         {
-            const auto buttonIndex = selected.kind == ControlKind::trackButton ? selected.index : selected.index + 32;
-            const auto& button = profile.buttons[static_cast<std::size_t>(buttonIndex)];
-            auto note = buttonMeaning(button.mode).note;
-            if (button.mode == 4)
-                note = button.dawMessage.empty() ? juce::String("Custom has no stored message.")
-                                                 : "Each press sends " + hexBytes(button.dawMessage) + ".";
-            text = note + " " + text;
-        }
-        statusLabel.setTooltip(text);
-    }
-    show(text, mixerui::muted);
-}
-
-void ControlInspectorComponent::refreshFields()
-{
-    hideFields();
-    selectionLabel.setText(hasSelection ? mixerui::utf8(controlDisplayName(selected)) : "No control selected",
-                           juce::dontSendNotification);
-    updateStatus();
-    updateActionButtons();
-
-    if (loading || !configuration || !hasSelection)
-        return;
-
-    const auto showEditors = activeProfile == DeviceProfile::ccUser && editingEnabled && !writing;
-    const auto& profile = configuration->profile(activeProfile);
-    const std::vector<std::uint8_t> knobTypes { 0, 1, 2, 3 };
-    const std::vector<std::uint8_t> sliderTypes { 0, 1, 2 };
-    const std::vector<std::uint8_t> buttonModes { 0, 1, 2, 3, 4, 5 };
-    const auto thumb = selected.kind == ControlKind::knob
-        ? mixerui::knobOutline
-        : selected.kind == ControlKind::slider ? mixerui::fader
-        : selected.kind == ControlKind::trackButton ? mixerui::trackButton
-                                                    : mixerui::globalButton;
-
-    // The CC field shows its MIDI name only when the byte is sent as a controller number.
-    const auto ccName = [&](const FieldMeaning& meaning, std::uint8_t cc) {
-        return meaning.ccIsController && showEditors ? ccCaption(cc) : meaning.ccName;
-    };
-    const auto ccValue = [](const FieldMeaning& meaning, std::uint8_t cc) {
-        return meaning.ccIsController ? ccText(cc) : number(cc);
-    };
-    const auto showValue = [&](int index, const juce::String& name, const juce::String& value,
-                               std::optional<EditableField> field, std::uint8_t raw, int maximum, bool asChannel) {
-        if (showEditors && field)
-        {
-            auto& editor = editors[static_cast<std::size_t>(index)];
-            editor.setColour(juce::Slider::thumbColourId, thumb);
-            setEditor(index, name, *field, raw, raw > maximum ? 255 : maximum, asChannel);
-            return;
-        }
-        setField(index, name, value);
-    };
-
-    switch (selected.kind)
-    {
-        case ControlKind::knob:
-        {
-            const auto& knob = profile.knobs[static_cast<std::size_t>(selected.index)];
-            const auto meaning = knobMeaning(knob.type);
-            ccIsController = meaning.ccIsController;
-            if (showEditors)
-                setChoice(0, "TYPE", EditableField::type, knob.type, knobTypes, "CC Abs, Aftertouch, Note, or CC Rel. Midi Suite calls these CC and CW.");
-            else
-                setField(0, "TYPE", namedValue(knobTypeName(knob.type), knob.type));
-            setField(1, "SPEED", knob.speed == 2 ? juce::String("Normal") : number(knob.speed));
-            showValue(2, "CHANNEL", channel(knob.channel), EditableField::channel, knob.channel, 15, true);
-            showValue(3, ccName(meaning, knob.cc), ccValue(meaning, knob.cc), EditableField::cc, knob.cc, 127, false);
-            showValue(4, meaning.minimumName, number(knob.minimum), EditableField::minimum, knob.minimum, 127, false);
-            showValue(5, meaning.maximumName, number(knob.maximum), EditableField::maximum, knob.maximum, 127, false);
-            break;
-        }
-        case ControlKind::slider:
-        {
-            const auto& slider = profile.sliders[static_cast<std::size_t>(selected.index)];
-            const auto meaning = sliderMeaning(slider.type);
-            ccIsController = meaning.ccIsController;
-            if (showEditors)
-                setChoice(0, "TYPE", EditableField::type, slider.type, sliderTypes, "CC, Aftertouch, or DAW.");
-            else
-                setField(0, "TYPE", namedValue(sliderTypeName(slider.type), slider.type));
-            showValue(1, "CHANNEL", channel(slider.channel), EditableField::channel, slider.channel, 15, true);
-            showValue(2, ccName(meaning, slider.cc), ccValue(meaning, slider.cc), EditableField::cc, slider.cc, 127, false);
-            showValue(3, meaning.minimumName, number(slider.minimum), EditableField::minimum, slider.minimum, 127, false);
-            showValue(4, meaning.maximumName, number(slider.maximum), EditableField::maximum, slider.maximum, 127, false);
-            break;
-        }
-        case ControlKind::trackButton:
-        case ControlKind::globalButton:
-        {
-            const auto buttonIndex = selected.kind == ControlKind::trackButton ? selected.index : selected.index + 32;
-            const auto& button = profile.buttons[static_cast<std::size_t>(buttonIndex)];
-            const auto meaning = buttonMeaning(button.mode);
-            ccIsController = meaning.ccIsController;
-            if (showEditors)
-                setChoice(0, "MODE", EditableField::mode, button.mode, buttonModes,
-                          "CC Single, CC Toggle, CC Push, Program, Custom, or Note. Value 1 and Value 2 stay on this button.");
-            else
-                setField(0, "MODE", namedValue(buttonModeName(button.mode), button.mode));
-            showValue(1, "CHANNEL", channel(button.channel), EditableField::channel, button.channel, 15, true);
-            showValue(2, ccName(meaning, button.cc), ccValue(meaning, button.cc), EditableField::cc, button.cc, 127, false);
-            showValue(3, meaning.value1Name, number(button.value1), EditableField::value1, button.value1, 127, false);
-            showValue(4, meaning.value2Name, number(button.value2), EditableField::value2, button.value2, 127, false);
-            showValue(5, "LED", number(button.led), EditableField::led, button.led, 255, false);
-            break;
+            hideSlot(4);
         }
     }
+
+    resized();
+    repaint();
 }
 
 void ControlInspectorComponent::paint(juce::Graphics& graphics)
 {
-    mixerui::paintPlate(graphics, getLocalBounds());
-    juce::Colour mark = mixerui::hairline;
-    if (hasSelection)
+    mixerui::paintCard(graphics, getLocalBounds().toFloat().withTrimmedBottom(6.0f));
+    graphics.setColour(familyColour(current.selection));
+    graphics.fillRoundedRectangle(juce::Rectangle<float>(20.0f, 20.0f, 4.0f, 40.0f), 2.0f);
+    if (readOnlyBadge.isVisible())
     {
-        switch (selected.kind)
-        {
-            case ControlKind::knob: mark = mixerui::knob; break;
-            case ControlKind::slider: mark = mixerui::fader; break;
-            case ControlKind::trackButton: mark = mixerui::trackButton; break;
-            case ControlKind::globalButton: mark = mixerui::globalButton; break;
-        }
+        graphics.setColour(mixerui::well);
+        graphics.fillRoundedRectangle(readOnlyBadge.getBounds().toFloat(), 4.0f);
     }
-    graphics.setColour(mark);
-    graphics.fillRoundedRectangle(16.0f, 16.0f, 8.0f, 28.0f, 3.0f);
 }
 
 void ControlInspectorComponent::resized()
 {
-    auto area = getLocalBounds().reduced(32, 14);
-    titleLabel.setBounds(area.getX(), area.getY(), 220, 16);
+    auto area = getLocalBounds().withTrimmedBottom(6).reduced(36, 18);
+    auto top = area.removeFromTop(62);
 
-    const int gap = 8;
-    const int actionWidth = 84;
-    const int copyWidth = 72;
-    const int ccWidth = 118;
-    const int dawWidth = 72;
-    const int y = area.getY() + 8;
-    int x = area.getRight();
-    x -= dawWidth;
-    dawButton.setBounds(x, y, dawWidth, 34);
-    x -= ccWidth;
-    ccUserButton.setBounds(x, y, ccWidth, 34);
-    x -= gap + copyWidth;
-    copyButton.setBounds(x, y, copyWidth, 34);
-    x -= gap + actionWidth;
-    exportButton.setBounds(x, y, actionWidth, 34);
-    x -= gap + actionWidth;
-    writeButton.setBounds(x, y, actionWidth, 34);
-    x -= gap + actionWidth;
-    revertButton.setBounds(x, y, actionWidth, 34);
+    auto actions = top.removeFromRight(240);
+    if (revert.isVisible())
+        revert.setBounds(actions.removeFromRight(96).withHeight(32));
+    if (readButton.isVisible())
+        readButton.setBounds(actions.removeFromRight(130).withHeight(32));
+    top.removeFromRight(16);
 
-    const auto textWidth = juce::jmax(120, x - gap - area.getX());
-    selectionLabel.setBounds(area.getX(), area.getY() + 16, textWidth, 30);
-    statusLabel.setBounds(area.getX(), area.getY() + 48, textWidth, 18);
-
-    auto fields = area.removeFromBottom(78);
-    const auto width = fields.getWidth() / 6;
-    for (int index = 0; index < 6; ++index)
+    kindLabel.setBounds(top.removeFromTop(14));
+    auto titleRow = top.removeFromTop(26);
+    const auto titleWidth = juce::GlyphArrangement::getStringWidthInt(titleLabel.getFont(), titleLabel.getText()) + 4;
+    titleLabel.setBounds(titleRow.removeFromLeft(juce::jmin(titleWidth, titleRow.getWidth())));
+    if (readOnlyBadge.isVisible())
     {
-        auto field = fields.withLeft(fields.getX() + index * width).withWidth(width).reduced(6, 0);
-        fieldNames[static_cast<std::size_t>(index)].setBounds(field.removeFromTop(16));
-        field.removeFromTop(4);
-        fieldValues[static_cast<std::size_t>(index)].setBounds(field);
-        const auto control = field.withSizeKeepingCentre(field.getWidth(), MixerLookAndFeel::fieldHeight);
-        editors[static_cast<std::size_t>(index)].setBounds(control);
-        if (choiceBox.isVisible() && choiceIndex == index)
-            choiceBox.setBounds(control);
+        titleRow.removeFromLeft(10);
+        readOnlyBadge.setBounds(titleRow.removeFromLeft(74).withSizeKeepingCentre(74, 18));
+    }
+    note.setBounds(top.withHeight(juce::jmax(16, top.getHeight())));
+
+    area.removeFromTop(12);
+    const auto fields = area.withHeight(16 + 6 + MixerLookAndFeel::fieldHeight + 4 + 14);
+    constexpr int gap = 14;
+    const auto width = (fields.getWidth() - gap * (slotCount - 1)) / slotCount;
+    const auto place = [&](int column, juce::Label& caption, juce::Component& control, juce::Label& helper) {
+        auto cell = fields.withX(fields.getX() + column * (width + gap)).withWidth(width);
+        caption.setBounds(cell.removeFromTop(16));
+        cell.removeFromTop(6);
+        control.setBounds(cell.removeFromTop(MixerLookAndFeel::fieldHeight));
+        cell.removeFromTop(4);
+        helper.setBounds(cell.removeFromTop(14));
+    };
+    place(0, choiceCaption, choice, choiceHelper);
+    for (int index = 0; index < slotCount - 1; ++index)
+    {
+        auto& slot = slots[static_cast<std::size_t>(index)];
+        place(index + 1, slot.caption, slot.number, slot.helper);
     }
 }
