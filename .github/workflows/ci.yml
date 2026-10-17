@@ -2,6 +2,8 @@ name: CI
 
 on:
   push:
+    branches: [main]
+    tags: ['v*']
   pull_request:
 
 permissions:
@@ -20,11 +22,22 @@ jobs:
       - name: Configure
         run: cmake -S . -B build
 
-      - name: Core tests
-        run: cmake --build build --target SMCMixerCoreTests -j 4
+      - name: Build tests
+        run: cmake --build build --target SMCMixerCoreTests SMCMixerUITests -j 4
 
       - name: Run core tests
         run: ./build/SMCMixerCoreTests
+
+      - name: Run UI tests
+        run: ./build/SMCMixerUITests_artefacts/Debug/SMCMixerUITests --render ui-renders
+
+      - name: Keep the UI renders
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-renders
+          path: ui-renders
+          if-no-files-found: ignore
 
       - name: Build the app
         run: cmake --build build --target SMCMixerGUI -j 4

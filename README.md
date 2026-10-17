@@ -12,19 +12,35 @@ The app is not notarized. The first time you open it, Control-click SMC Mixer To
 
 ## Use
 
-Connect the mixer with USB-C or Bluetooth and open the app. It reads a 6,282-byte settings image: the DAW profile, then the CC / User profile, 3,141 bytes each. Click a knob, fader, or button to see that control's stored settings. The panel only selects a control. It does not send performance MIDI.
+Connect the mixer with USB-C or Bluetooth and open the app. It finds the mixer on the link chosen at the top right, reads its identity, then reads a 6,282-byte settings image: the DAW profile, then the CC / User profile, 3,141 bytes each. The bar across the top says whether the mixer is online, what the app is doing, and what the link reports: the USB-C port, or battery and signal over Bluetooth. Refresh reads everything again.
 
-CC / User and DAW on the inspector choose which stored profile is on screen. The mixer's live mode stays where it is. The M-VAVE manual switches it by holding Shift and pressing Left or Right.
+The panel draws the mixer as it is laid out: eight channels of a knob over a fader and its Mute, Solo, Record, and Select keys, then the transport keys. Each control shows what is stored for it. A knob shows its CC number, its type, and its Min to Max range on the ring. A fader shows its range on the slot, and each key shows the CC, note, or program it sends. Click a control, or move between them with the arrow keys, to see all of its settings below. The panel only selects a control. It does not send performance MIDI.
 
-In the CC / User view you can edit type, channel, CC, minimum, and maximum. Buttons have a mode, value 1, value 2, and LED. Knob types are CC Abs, Aftertouch, Note, and CC Rel. Midi Suite calls CC Rel "CW". Field names follow the type or mode: a CC Rel knob has CW and CCW values, and a Program button has Bank MSB, Bank LSB, and Program. A field the mixer does not send is marked not used. The messages each type sends are listed below. Revert restores the selected control. Write sends only the records that changed, reads those addresses back and checks them, then tells the mixer to save to flash so the edits survive a power cycle. If any step fails, nothing is saved. The edits stay on screen so Write can try again, and switching the mixer off and on discards whatever reached it. USB-C carries the payload as SysEx on the Private port. Bluetooth sends the same payload on the vendor channel. The DAW view is read-only.
+CC / User and DAW, at the top left of the panel, choose which stored profile is on screen. The mixer's live mode stays where it is. The M-VAVE manual switches it by holding Shift and pressing Left or Right.
+
+In the CC / User profile you can edit type, channel, CC, minimum, and maximum. Keys have a mode, value 1, value 2, and LED. Knob types are CC Abs, Aftertouch, Note, and CC Rel. Midi Suite calls CC Rel "CW". Field names follow the type or mode: a CC Rel knob has CW and CCW values, and a Program key has Bank MSB, Bank LSB, and Program. A field the mixer does not send is dimmed and marked not sent. The messages each type sends are listed below. Type a number, drag up or down on it, scroll, use the arrow keys, or step with − and +. The chevron beside Channel and CC lists every value, with the MIDI name of each CC. Min cannot pass Max, except on a CC Rel knob, whose two values are sent per step rather than a range. Leaving CC Rel swaps the two values if Min would end up above Max. Speed and LED are shown as stored; what they change has not been measured, so Speed is read-only.
+
+A dot marks each control with an unsaved edit. Undo and Redo step through edits, and one drag counts as one step. Revert restores the selected control, and Revert all restores every control. Write sends only the records that changed, reads those addresses back and checks them, then tells the mixer to save to flash so the edits survive a power cycle. If any step fails, nothing is saved. The edits stay on screen so Write can try again, and switching the mixer off and on discards whatever reached it. USB-C carries the payload as SysEx on the Private port. Bluetooth sends the same payload on the vendor channel. The DAW profile is read-only. Quitting with unsaved edits, by the close button or Cmd+Q, asks first.
 
 The mixer sends each control message on its USB-C Master port, its Private port, and over Bluetooth at the same time. In a host or instrument, turn on only one of these inputs, or every message arrives two or three times.
 
-Export saves the profile you are viewing as JSON. Copy puts that JSON on the clipboard. Channels in the file are numbered from 1.
+Export saves the profile on screen as JSON. Copy JSON puts that JSON on the clipboard. Channels in the file are numbered from 1.
 
-The version next to the title is `1.0.3` plus the git commit used for the build. A dirty worktree adds `.dirty`. The version itself is set once, in `project()` in CMakeLists.txt.
+| Shortcut | Action |
+| --- | --- |
+| Cmd+R | Refresh |
+| Shift+Cmd+R | Read the settings again |
+| Cmd+S | Write changes |
+| Cmd+Z, Shift+Cmd+Z | Undo, Redo |
+| Cmd+Delete | Revert the selected control |
+| Cmd+1, Cmd+2 | Show CC / User, show DAW |
+| Cmd+E | Export the profile as JSON |
+| Shift+Cmd+C | Copy the profile as JSON |
+| Shift+Cmd+D | Diagnostics |
 
-The gear at the upper left opens diagnostics. It reports the USB-C Private and Master ports, the Bluetooth MIDI port, and which path carries settings. A Bluetooth connection also lists manufacturer, model, battery, signal, and services. Read snapshot loads the 6,282-byte image. Export .bin saves that image.
+The gear at the top right opens diagnostics. It reports the USB-C Private and Master ports, the Bluetooth MIDI port, which path carries settings, and the last error. A Bluetooth connection also lists manufacturer, model, battery, signal, and services. Read settings loads the 6,282-byte image, and Export image saves it.
+
+Diagnostics and About SMC Mixer Tool show the version: `1.0.3` plus the git commit used for the build. A dirty worktree adds `.dirty`. The version itself is set once, in `project()` in CMakeLists.txt.
 
 ## MIDI each type sends
 
@@ -68,8 +84,9 @@ macOS 12 or later, CMake 3.22, and the Xcode command-line tools. CMake fetches J
 
 ```
 cmake -S . -B build
-cmake --build build --target SMCMixerCoreTests
+cmake --build build --target SMCMixerCoreTests SMCMixerUITests
 ./build/SMCMixerCoreTests
+./build/SMCMixerUITests_artefacts/Debug/SMCMixerUITests
 cmake --build build --target SMCMixerGUI
 open "build/SMCMixerGUI_artefacts/Debug/SMC Mixer Tool.app"
 ```
@@ -81,7 +98,7 @@ cmake -S . -B build-release -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES
 cmake --build build-release --target SMCMixerGUI
 ```
 
-The core tests cover the vendor frames, the snapshot layout, field limits, SysEx assembly, and the write sequence against a simulated mixer. They build with warnings as errors. GitHub Actions runs them and builds the app on macOS for every push and pull request.
+The core tests cover the vendor frames, acknowledgements, the snapshot layout, field limits and ranges, undo, the control descriptions, SysEx assembly, and the write sequence against a simulated mixer. They build with warnings as errors. The UI tests build the app's components without a window and never open a MIDI port or Bluetooth: they check the layout from the smallest window size up, the selection ring, the Min and Max editors, the status bar, the quit prompt, the commands, and text contrast. `SMCMixerUITests --render <folder>` also saves a PNG of each state. GitHub Actions runs both and builds the app on macOS for every pull request and every push to main.
 
 ## License
 
