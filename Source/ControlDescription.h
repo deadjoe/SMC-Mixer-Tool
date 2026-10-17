@@ -5,13 +5,13 @@
 #include <string>
 
 // What each stored field means for a type or mode, as measured on the mixer's Master port.
+// Min and Max bound the value of every knob and fader type except CC Rel.
 // The README lists the same measurements.
 struct FieldMeaning
 {
     bool ccIsController = true; // the CC byte goes out as a controller number
     bool ccUsed = true;
     std::string ccName = "CC";
-    bool rangeUsed = true;
     std::string minimumName = "Min";
     std::string maximumName = "Max";
     bool value1Used = true;

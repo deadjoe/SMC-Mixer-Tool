@@ -283,11 +283,9 @@ void ControlInspectorComponent::show(const View& view)
     else
     {
         const auto relative = isRelativeKnob(profile, selection);
-        const auto rangeHelper = !meaning.rangeUsed ? juce::String("Not sent")
-                               : relative           ? juce::String("Sent on each step")
-                                                    : juce::String();
-        showNumber(2, EditableField::minimum, mixerui::utf8(meaning.minimumName), rangeHelper, meaning.rangeUsed, 0, false);
-        showNumber(3, EditableField::maximum, mixerui::utf8(meaning.maximumName), rangeHelper, meaning.rangeUsed, 0, false);
+        const auto rangeHelper = relative ? juce::String("Sent on each step") : juce::String();
+        showNumber(2, EditableField::minimum, mixerui::utf8(meaning.minimumName), rangeHelper, true, 0, false);
+        showNumber(3, EditableField::maximum, mixerui::utf8(meaning.maximumName), rangeHelper, true, 0, false);
         if (selection.kind == ControlKind::knob)
         {
             showReadOnly(4, "Speed", profile.knobs[static_cast<std::size_t>(selection.index)].speed, "Not measured, read-only");

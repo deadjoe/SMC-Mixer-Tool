@@ -778,7 +778,13 @@ void testDescriptions()
     expect(summarize(profile, { ControlKind::trackButton, 3 }).primary == "SysEx", "custom button summary");
 
     expect(meaningFor(profile, { ControlKind::knob, 1 }).minimumName == "CCW value", "relative field names");
-    expect(!meaningFor(profile, { ControlKind::knob, 3 }).rangeUsed, "note knob has no range");
+    // Measured with Min 40 and Max 80: Note knobs and DAW faders keep Pitch Bend inside the range.
+    const auto noteKnob = summarize(profile, { ControlKind::knob, 3 });
+    expect(noteKnob.hasRange && noteKnob.rangeMinimum == 0 && noteKnob.rangeMaximum == 127, "note knob shows its range");
+    expect(summarize(profile, { ControlKind::slider, 1 }).hasRange, "daw fader shows its range");
+    expect(controlNote(profile, { ControlKind::knob, 3 }).find("Pitch Bend between Min and Max") != std::string::npos,
+           "note knob note names the range");
+    expect(describe(profile, { ControlKind::knob, 3 }).find("Min 0") != std::string::npos, "note knob description lists Min");
     expect(!meaningFor(profile, { ControlKind::trackButton, 2 }).value1Used, "note button values unused");
     expect(meaningFor(profile, { ControlKind::trackButton, 1 }).value2Name == "Program", "program field names");
     expect(controlNote(profile, { ControlKind::trackButton, 3 }) == "Each press sends F0 7F F7.", "custom message note");

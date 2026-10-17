@@ -45,24 +45,26 @@ The gear at the top right opens diagnostics. It reports the USB-C Private and Ma
 
 ## MIDI each type sends
 
-These were captured on the USB-C Master port with test values written to RAM only, and the original bytes were written back afterward. Value 1 and Value 2 were 17 and 34, so a fixed 0 or 127 could not pass for a stored value. `n` is the channel.
+These were captured on the USB-C Master port with test values written to RAM only, and the original bytes were written back afterward. Value 1 and Value 2 were 17 and 34, and Min and Max were 40 and 80, so a fixed 0 or 127 could not pass for a stored value. `n` is the channel.
 
 Knobs:
 
 | Value | Type | Messages |
 | --- | --- | --- |
 | 0 | CC Abs | `Bn cc vv`, the value moving between Min and Max. Midi Suite calls it CC. |
-| 1 | Aftertouch | `Dn vv`, channel pressure. No CC number is sent. |
-| 2 | Note | Note On 104 plus the channel number on channel 1 while turning, velocity 127 then 0, and Pitch Bend `En 00 vv` on the knob's channel. This is a Mackie fader touch. No CC number is sent. |
+| 1 | Aftertouch | `Dn vv`, channel pressure between Min and Max. No CC number is sent. |
+| 2 | Note | Note On 104 plus the channel number on channel 1 while turning, velocity 127 then 0, and Pitch Bend `En 00 vv` between Min and Max on the knob's channel. This is a Mackie fader touch. No CC number is sent. |
 | 3 | CC Rel | One `Bn cc vv` per step: Max clockwise, Min counter-clockwise. Midi Suite calls it CW. The DAW profile uses 1 and 65, Mackie's +1 and -1. |
 
 Faders:
 
 | Value | Type | Messages |
 | --- | --- | --- |
-| 0 | CC | `Bn cc vv` |
-| 1 | Aftertouch | `Dn vv`, channel pressure. No CC number is sent. |
-| 2 | DAW | Pitch Bend `En 00 vv`. The low byte is always 0. No CC number is sent. |
+| 0 | CC | `Bn cc vv` between Min and Max |
+| 1 | Aftertouch | `Dn vv`, channel pressure between Min and Max. No CC number is sent. |
+| 2 | DAW | Pitch Bend `En 00 vv` between Min and Max. The low byte is always 0. No CC number is sent. |
+
+A knob moves its value one step per detent and stops at Min and Max. Right after its type changes, it can start outside the range until it is turned into it. A fader spreads its whole travel from Min to Max.
 
 Buttons:
 
@@ -75,7 +77,7 @@ Buttons:
 | 4 | Custom | The stored message on each press, for example `F0 7F 7F 06 08 F7` |
 | 5 | Note | `9n cc 7F` on press, `9n cc 00` on release. Value 1 and Value 2 are not sent. |
 
-Not yet measured: what knob Speed does, whether Min and Max limit Note and Aftertouch knobs, and whether these types behave the same in DAW mode.
+Not yet measured: what knob Speed does, and whether these types behave the same in DAW mode.
 
 ## Build
 

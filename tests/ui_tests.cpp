@@ -341,6 +341,15 @@ void testLeavingRelative()
     expect(minimum != nullptr && minimum->getMaximum() == 65, "min can move up to max");
     minimum->setValueFromUser(30);
     expect(userByte(*main, knob + 4) == 30, "min is editable after leaving CC Rel");
+
+    // Min and Max bound a Note knob's Pitch Bend, as measured, so they stay editable.
+    inspector.choiceBox().setSelectedId(3, juce::sendNotificationSync);
+    expect(userByte(*main, knob) == 2, "knob is Note");
+    auto* noteMaximum = inspector.numberFieldFor(EditableField::maximum);
+    expect(noteMaximum != nullptr && noteMaximum->isEnabled() && noteMaximum->isEditable(), "Note knob max is editable");
+    noteMaximum->setValueFromUser(90);
+    expect(userByte(*main, knob + 5) == 90, "Note knob max changes");
+    expect(main->overview().diagram().viewFor({ ControlKind::knob, 1 }).getSummary()->hasRange, "Note knob ring shows its range");
 }
 
 void testStatusTooltip()
