@@ -24,11 +24,19 @@ bool containsCaseInsensitive(const std::string& value, const std::string& part)
 
 std::string MidiEndpointDescriptor::fullName() const
 {
+    // The mixer names its entity and endpoint alike ("-Private"), so skip a part already shown.
     std::string result;
     for (const auto* value : { &deviceName, &entityName, &endpointName })
     {
-        if (value->empty() || *value == "(none)")
+        if (value->empty() || *value == "(none)" || *value == "(unknown)")
             continue;
+        if (containsCaseInsensitive(result, *value))
+            continue;
+        if (!result.empty() && containsCaseInsensitive(*value, result))
+        {
+            result = *value;
+            continue;
+        }
         if (!result.empty())
             result += ' ';
         result += *value;
@@ -310,6 +318,11 @@ void CoreMidiTransport::receive(const MIDIPacketList* packets)
             if (byte == 0xf0)
             {
                 responseBuffer = Bytes { byte };
+            }
+            else if (byte >= 0x80 && byte != 0xf7)
+            {
+                // Any other status byte ends an unfinished SysEx. Drop it rather than splice it.
+                responseBuffer.clear();
             }
             else if (!responseBuffer.empty())
             {

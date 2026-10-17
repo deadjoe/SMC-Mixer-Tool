@@ -128,6 +128,9 @@ void DeviceController::run()
         }
         catch (const std::exception& error)
         {
+            // A USB-C port that timed out may be stale after a replug or power cycle. Reopen it next time.
+            if (request.transport == TransportKind::usbC)
+                midi.close();
             if (!threadShouldExit() && !stop.load())
             {
                 DeviceEvent event;
@@ -141,6 +144,8 @@ void DeviceController::run()
         }
         catch (...)
         {
+            if (request.transport == TransportKind::usbC)
+                midi.close();
             if (!threadShouldExit() && !stop.load())
             {
                 DeviceEvent event;
@@ -180,6 +185,8 @@ void DeviceController::executeRefresh(TransportKind transport)
 
     if (transport == TransportKind::usbC)
     {
+        // Refresh always finds the ports again, so a power-cycled mixer gets fresh endpoints.
+        midi.close();
         snapshot.rawSysEx = midi.query(transport, VendorProtocol::versionQuerySysEx(), std::chrono::milliseconds { 2000 }, &stop);
         snapshot.version = VendorProtocol::parseVersionResponse(snapshot.rawSysEx);
         snapshot.sourceName = midi.connectedSourceName();
