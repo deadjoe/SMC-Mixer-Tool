@@ -14,6 +14,11 @@ juce::String channel(std::uint8_t value)
     return "Channel " + juce::String(static_cast<int>(value) + 1);
 }
 
+juce::String namedValue(const char* name, std::uint8_t value)
+{
+    return name != nullptr ? juce::String(name) : number(value);
+}
+
 juce::String ccText(std::uint8_t value)
 {
     juce::String description = "Undefined";
@@ -136,6 +141,17 @@ ControlInspectorComponent::ControlInspectorComponent()
         editor.setVisible(false);
         addAndMakeVisible(editor);
     }
+
+    choiceBox.setVisible(false);
+    choiceBox.onChange = [this] {
+        if (suppressChoiceCallbacks || !choiceField || !onControlEdited || !hasSelection)
+            return;
+        const auto selectedId = choiceBox.getSelectedId();
+        if (selectedId <= 0)
+            return;
+        onControlEdited(selected, activeProfile, *choiceField, static_cast<std::uint8_t>(selectedId - 1));
+    };
+    addAndMakeVisible(choiceBox);
 
     updateProfileButtons();
     clearConfiguration();
@@ -298,6 +314,8 @@ void ControlInspectorComponent::hideFields()
         editors[static_cast<std::size_t>(index)].setVisible(false);
         editorFields[static_cast<std::size_t>(index)].reset();
     }
+    choiceBox.setVisible(false);
+    choiceField.reset();
 }
 
 void ControlInspectorComponent::setField(int index, const juce::String& name, const juce::String& value, bool visible)
@@ -308,11 +326,44 @@ void ControlInspectorComponent::setField(int index, const juce::String& name, co
     valueLabel.setText(value, juce::dontSendNotification);
     nameLabel.setVisible(visible);
     valueLabel.setVisible(visible);
-    if (visible)
+}
+
+void ControlInspectorComponent::setChoice(int index,
+                                          const juce::String& name,
+                                          EditableField field,
+                                          std::uint8_t value,
+                                          const std::vector<std::uint8_t>& values,
+                                          const juce::String& tooltip)
+{
+    auto& nameLabel = fieldNames[static_cast<std::size_t>(index)];
+    auto& valueLabel = fieldValues[static_cast<std::size_t>(index)];
+    nameLabel.setText(name, juce::dontSendNotification);
+    nameLabel.setVisible(true);
+    valueLabel.setVisible(false);
+    editors[static_cast<std::size_t>(index)].setVisible(false);
+    editorFields[static_cast<std::size_t>(index)].reset();
+
+    suppressChoiceCallbacks = true;
+    choiceBox.clear(juce::dontSendNotification);
+    bool listed = false;
+    for (const auto option : values)
     {
-        editors[static_cast<std::size_t>(index)].setVisible(false);
-        editorFields[static_cast<std::size_t>(index)].reset();
+        const char* label = field == EditableField::mode ? buttonModeName(option)
+            : selected.kind == ControlKind::slider ? sliderTypeName(option)
+                                                    : knobTypeName(option);
+        choiceBox.addItem(namedValue(label, option), static_cast<int>(option) + 1);
+        listed = listed || option == value;
     }
+    if (!listed)
+        choiceBox.addItem(number(value), static_cast<int>(value) + 1);
+    choiceBox.setSelectedId(static_cast<int>(value) + 1, juce::dontSendNotification);
+    choiceBox.setTooltip(tooltip);
+    choiceBox.setEnabled(!writing);
+    choiceBox.setVisible(true);
+    choiceField = field;
+    choiceIndex = index;
+    suppressChoiceCallbacks = false;
+    choiceBox.setBounds(editors[static_cast<std::size_t>(index)].getBounds());
 }
 
 void ControlInspectorComponent::setEditor(int index,
@@ -474,10 +525,9 @@ void ControlInspectorComponent::refreshFields()
 
     const auto showEditors = activeProfile == DeviceProfile::ccUser && editingEnabled && !writing;
     const auto& profile = configuration->profile(activeProfile);
-    const auto typeText = [this](std::uint8_t type) {
-        return activeProfile == DeviceProfile::ccUser && type == 0
-            ? juce::String("CC") : number(type);
-    };
+    const std::vector<std::uint8_t> knobTypes { 0, 1, 2, 3 };
+    const std::vector<std::uint8_t> sliderTypes { 0, 1, 2 };
+    const std::vector<std::uint8_t> buttonModes { 0, 1, 2, 3, 4, 5 };
     const auto thumb = selected.kind == ControlKind::knob
         ? mixerui::knobOutline
         : selected.kind == ControlKind::slider ? mixerui::fader
@@ -501,7 +551,10 @@ void ControlInspectorComponent::refreshFields()
         case ControlKind::knob:
         {
             const auto& knob = profile.knobs[static_cast<std::size_t>(selected.index)];
-            setField(0, "TYPE", typeText(knob.type));
+            if (showEditors)
+                setChoice(0, "TYPE", EditableField::type, knob.type, knobTypes, "CC, Aftertouch, Note, or CW.");
+            else
+                setField(0, "TYPE", namedValue(knobTypeName(knob.type), knob.type));
             setField(1, "SPEED", knob.speed == 2 ? juce::String("Normal") : number(knob.speed));
             showValue(2, "CHANNEL", channel(knob.channel), EditableField::channel, knob.channel, 15, true);
             showValue(3, "CC", ccText(knob.cc), EditableField::cc, knob.cc, 127, false);
@@ -512,7 +565,10 @@ void ControlInspectorComponent::refreshFields()
         case ControlKind::slider:
         {
             const auto& slider = profile.sliders[static_cast<std::size_t>(selected.index)];
-            setField(0, "TYPE", typeText(slider.type));
+            if (showEditors)
+                setChoice(0, "TYPE", EditableField::type, slider.type, sliderTypes, "CC, Aftertouch, or DAW.");
+            else
+                setField(0, "TYPE", namedValue(sliderTypeName(slider.type), slider.type));
             showValue(1, "CHANNEL", channel(slider.channel), EditableField::channel, slider.channel, 15, true);
             showValue(2, "CC", ccText(slider.cc), EditableField::cc, slider.cc, 127, false);
             showValue(3, "MIN", number(slider.minimum), EditableField::minimum, slider.minimum, 127, false);
@@ -524,8 +580,11 @@ void ControlInspectorComponent::refreshFields()
         {
             const auto buttonIndex = selected.kind == ControlKind::trackButton ? selected.index : selected.index + 32;
             const auto& button = profile.buttons[static_cast<std::size_t>(buttonIndex)];
-            setField(0, "MODE", activeProfile == DeviceProfile::ccUser && button.mode == 2
-                                    ? juce::String("CC Push") : number(button.mode));
+            if (showEditors)
+                setChoice(0, "MODE", EditableField::mode, button.mode, buttonModes,
+                          "CC Single, CC Toggle, CC Push, Program, Custom, or Note. Value 1 and Value 2 stay on this button.");
+            else
+                setField(0, "MODE", namedValue(buttonModeName(button.mode), button.mode));
             showValue(1, "CHANNEL", channel(button.channel), EditableField::channel, button.channel, 15, true);
             showValue(2, "CC", ccText(button.cc), EditableField::cc, button.cc, 127, false);
             showValue(3, "VALUE 1", number(button.value1), EditableField::value1, button.value1, 127, false);
@@ -592,5 +651,7 @@ void ControlInspectorComponent::resized()
         field.removeFromTop(4);
         fieldValues[static_cast<std::size_t>(index)].setBounds(field);
         editors[static_cast<std::size_t>(index)].setBounds(field);
+        if (choiceBox.isVisible() && choiceIndex == index)
+            choiceBox.setBounds(field);
     }
 }

@@ -209,6 +209,22 @@ int main()
     }
     expect(sawButton, "button record address and cc");
     expect(!records.apply({ ControlKind::slider, 0 }, DeviceProfile::daw, EditableField::minimum, 1, error), "daw slider locked");
+    expect(std::string(knobTypeName(0)) == "CC" && std::string(knobTypeName(3)) == "CW", "knob type names");
+    expect(knobTypeName(4) == nullptr, "unknown knob type");
+    expect(std::string(sliderTypeName(1)) == "Aftertouch" && std::string(sliderTypeName(2)) == "DAW", "slider type names");
+    expect(std::string(buttonModeName(0)) == "CC Single" && std::string(buttonModeName(2)) == "CC Push", "button mode names");
+    expect(std::string(buttonModeName(4)) == "Custom" && std::string(buttonModeName(5)) == "Note", "button custom and note");
+    expect(records.apply({ ControlKind::knob, 0 }, DeviceProfile::ccUser, EditableField::type, 3, error), "knob type");
+    expect(records.workingBytes()[layout::profileSize + layout::knobsOffset] == 3, "knob type byte");
+    expect(records.workingBytes()[layout::profileSize + layout::knobsOffset + 3] == 0x1F, "type edit leaves cc");
+    expect(records.apply({ ControlKind::slider, 1 }, DeviceProfile::ccUser, EditableField::type, 2, error), "slider type");
+    const auto sliderTypeAt = layout::profileSize + layout::slidersOffset + layout::sliderSize;
+    expect(records.workingBytes()[sliderTypeAt] == 2, "slider type byte");
+    expect(records.apply({ ControlKind::trackButton, 4 }, DeviceProfile::ccUser, EditableField::mode, 5, error), "track mode");
+    expect(records.workingBytes()[layout::profileSize + 4 * layout::buttonSize] == 5, "track mode byte");
+    expect(records.apply({ ControlKind::globalButton, 1 }, DeviceProfile::ccUser, EditableField::mode, 1, error), "global mode");
+    expect(records.workingBytes()[layout::profileSize + 33 * layout::buttonSize] == 1, "global mode byte");
+    expect(!records.apply({ ControlKind::knob, 0 }, DeviceProfile::ccUser, EditableField::mode, 1, error), "knob has no mode");
 
     auto exported = image;
     const auto messageAt = layout::profileSize;

@@ -21,6 +21,43 @@ std::string nameAt(Names& names, std::size_t count, int index)
 }
 }
 
+const char* knobTypeName(std::uint8_t type)
+{
+    switch (type)
+    {
+        case 0: return "CC";
+        case 1: return "Aftertouch";
+        case 2: return "Note";
+        case 3: return "CW";
+        default: return nullptr;
+    }
+}
+
+const char* sliderTypeName(std::uint8_t type)
+{
+    switch (type)
+    {
+        case 0: return "CC";
+        case 1: return "Aftertouch";
+        case 2: return "DAW";
+        default: return nullptr;
+    }
+}
+
+const char* buttonModeName(std::uint8_t mode)
+{
+    switch (mode)
+    {
+        case 0: return "CC Single";
+        case 1: return "CC Toggle";
+        case 2: return "CC Push";
+        case 3: return "Program";
+        case 4: return "Custom";
+        case 5: return "Note";
+        default: return nullptr;
+    }
+}
+
 ControlConfiguration ControlConfiguration::parse(const Bytes& data)
 {
     if (data.size() != layout::snapshotSize)

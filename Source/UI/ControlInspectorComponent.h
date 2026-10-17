@@ -42,6 +42,8 @@ private:
     void updateStatus();
     void updateActionButtons();
     void setField(int index, const juce::String& name, const juce::String& value, bool visible = true);
+    void setChoice(int index, const juce::String& name, EditableField field, std::uint8_t value,
+                   const std::vector<std::uint8_t>& values, const juce::String& tooltip);
     void setEditor(int index, const juce::String& name, EditableField field, std::uint8_t value, int maximum, bool asChannel);
     void hideFields();
     void handleEditor(int index);
@@ -61,7 +63,10 @@ private:
     std::array<juce::Label, 6> fieldNames;
     std::array<juce::Label, 6> fieldValues;
     std::array<juce::Slider, 6> editors;
+    juce::ComboBox choiceBox;
     std::array<std::optional<EditableField>, 6> editorFields;
+    std::optional<EditableField> choiceField;
+    int choiceIndex = 0;
     std::optional<ControlConfiguration> configuration;
     std::vector<ControlSelection> dirtyControls;
     ControlSelection selected;
@@ -72,6 +77,7 @@ private:
     bool writing = false;
     bool editingEnabled = true;
     bool suppressEditorCallbacks = false;
+    bool suppressChoiceCallbacks = false;
     double loadProgress = 0.0;
     double writeProgress = 0.0;
 };

@@ -75,6 +75,8 @@ std::optional<std::size_t> SettingsDocument::fieldOffset(ControlKind kind, Edita
         case ControlKind::knob:
             switch (field)
             {
+                case EditableField::type: return 0;
+                case EditableField::mode: return std::nullopt;
                 case EditableField::channel: return 2;
                 case EditableField::cc: return 3;
                 case EditableField::minimum: return 4;
@@ -83,9 +85,12 @@ std::optional<std::size_t> SettingsDocument::fieldOffset(ControlKind kind, Edita
                 case EditableField::value2:
                 case EditableField::led: return std::nullopt;
             }
+            return std::nullopt;
         case ControlKind::slider:
             switch (field)
             {
+                case EditableField::type: return 0;
+                case EditableField::mode: return std::nullopt;
                 case EditableField::channel: return 1;
                 case EditableField::cc: return 2;
                 case EditableField::minimum: return 3;
@@ -94,10 +99,13 @@ std::optional<std::size_t> SettingsDocument::fieldOffset(ControlKind kind, Edita
                 case EditableField::value2:
                 case EditableField::led: return std::nullopt;
             }
+            return std::nullopt;
         case ControlKind::trackButton:
         case ControlKind::globalButton:
             switch (field)
             {
+                case EditableField::mode: return 0;
+                case EditableField::type: return std::nullopt;
                 case EditableField::channel: return 1;
                 case EditableField::cc: return 2;
                 case EditableField::value1: return 3;
@@ -106,6 +114,7 @@ std::optional<std::size_t> SettingsDocument::fieldOffset(ControlKind kind, Edita
                 case EditableField::minimum:
                 case EditableField::maximum: return std::nullopt;
             }
+            return std::nullopt;
     }
     return std::nullopt;
 }

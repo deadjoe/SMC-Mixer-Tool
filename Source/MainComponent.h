@@ -36,8 +36,15 @@ private:
     void editControl(ControlSelection selection, DeviceProfile profile, EditableField field, std::uint8_t value);
     void revertSelected(ControlSelection selection, DeviceProfile profile);
     void writeSettings();
+    void startWrite();
     void publishDocument(bool resetEditors);
-    bool confirmDiscard();
+    void confirmDiscard(std::function<void()> onConfirmed);
+    void confirmThen(juce::MessageBoxIconType icon,
+                     const juce::String& title,
+                     const juce::String& message,
+                     const juce::String& confirmText,
+                     const juce::String& cancelText,
+                     std::function<void()> onConfirmed);
     bool editingEnabled() const;
     void handleEvent(DeviceEvent event);
     void setBusy(bool busy, bool settingsOperation);
@@ -65,6 +72,7 @@ private:
     TransportKind requestedTransport = TransportKind::usbC;
     bool showingDiagnostics = false;
     bool busy = false;
+    bool choicePending = false;
     bool hasSnapshot = false;
     DeviceSnapshot currentSnapshot;
     SettingsDocument document;

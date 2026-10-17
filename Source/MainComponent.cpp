@@ -113,12 +113,16 @@ MainComponent::~MainComponent()
 
 void MainComponent::selectTransport(TransportKind transport)
 {
-    if (busy || !confirmDiscard())
+    if (busy)
         return;
-    requestedTransport = transport;
-    diagnostics.setActiveTransport(transport);
-    updateSelectionColours();
-    refreshDeviceNow();
+    confirmDiscard([this, transport] {
+        if (busy)
+            return;
+        requestedTransport = transport;
+        diagnostics.setActiveTransport(transport);
+        updateSelectionColours();
+        refreshDeviceNow();
+    });
 }
 
 void MainComponent::showDiagnostics(bool shouldShowDiagnostics)
@@ -153,18 +157,49 @@ bool MainComponent::editingEnabled() const
     return !busy && document.loaded();
 }
 
-bool MainComponent::confirmDiscard()
+void MainComponent::confirmDiscard(std::function<void()> onConfirmed)
 {
     if (!document.isDirty())
-        return true;
-    return juce::AlertWindow::showOkCancelBox(
-        juce::MessageBoxIconType::WarningIcon,
-        "Unsaved edits",
-        "This reads the device again and discards CC / User edits that have not been written.",
-        "Read again",
-        "Keep edits",
+    {
+        if (onConfirmed)
+            onConfirmed();
+        return;
+    }
+    confirmThen(juce::MessageBoxIconType::WarningIcon,
+                "Unsaved edits",
+                "This reads the device again and discards CC / User edits that have not been written.",
+                "Read again",
+                "Keep edits",
+                std::move(onConfirmed));
+}
+
+void MainComponent::confirmThen(juce::MessageBoxIconType icon,
+                                const juce::String& title,
+                                const juce::String& message,
+                                const juce::String& confirmText,
+                                const juce::String& cancelText,
+                                std::function<void()> onConfirmed)
+{
+    if (choicePending)
+        return;
+    choicePending = true;
+    // JUCE 9 leaves modal loops off, so this returns before the click. 1 is the confirm button.
+    juce::AlertWindow::showOkCancelBox(
+        icon,
+        title,
+        message,
+        confirmText,
+        cancelText,
         this,
-        nullptr);
+        juce::ModalCallbackFunction::create(
+            [safe = juce::Component::SafePointer<MainComponent>(this),
+             action = std::move(onConfirmed)](int result) {
+                if (safe == nullptr)
+                    return;
+                safe->choicePending = false;
+                if (result == 1 && action)
+                    action();
+            }));
 }
 
 void MainComponent::publishDocument(bool resetEditors)
@@ -181,9 +216,12 @@ void MainComponent::publishDocument(bool resetEditors)
 
 void MainComponent::refreshDevice()
 {
-    if (busy || !confirmDiscard())
+    if (busy)
         return;
-    refreshDeviceNow();
+    confirmDiscard([this] {
+        if (!busy)
+            refreshDeviceNow();
+    });
 }
 
 void MainComponent::refreshDeviceNow()
@@ -213,9 +251,10 @@ void MainComponent::readSettings()
         overview.setSettingsError("The device is busy. Select the control again in a moment.");
         return;
     }
-    if (!confirmDiscard())
-        return;
-    readSettingsNow();
+    confirmDiscard([this] {
+        if (!busy)
+            readSettingsNow();
+    });
 }
 
 void MainComponent::readSettingsNow()
@@ -268,19 +307,23 @@ void MainComponent::writeSettings()
 
     const auto count = static_cast<int>(spans.size());
     const auto link = requestedTransport == TransportKind::bluetooth ? "Bluetooth" : "USB-C";
-    const auto confirmed = juce::AlertWindow::showOkCancelBox(
-        juce::MessageBoxIconType::QuestionIcon,
-        "Write settings",
-        "Write " + juce::String(count) + (count == 1 ? " changed record" : " changed records")
-            + " to the SMC-Mixer over " + link + "? The mixer stays in its current mode.",
-        "Write",
-        "Cancel",
-        this,
-        nullptr);
-    if (!confirmed || busy || !document.isDirty())
+    confirmThen(juce::MessageBoxIconType::QuestionIcon,
+                "Write settings",
+                "Write " + juce::String(count) + (count == 1 ? " changed record" : " changed records")
+                    + " to the SMC-Mixer over " + link + "? The mixer stays in its current mode.",
+                "Write",
+                "Cancel",
+                [this] { startWrite(); });
+}
+
+void MainComponent::startWrite()
+{
+    if (busy || !document.isDirty())
         return;
 
     auto freshSpans = document.dirtySpans();
+    if (freshSpans.empty())
+        return;
     if (!controller.requestWrite(requestedTransport, std::move(freshSpans)))
     {
         overview.setSettingsError("The device is busy. Try the write again in a moment.");

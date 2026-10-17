@@ -14,6 +14,8 @@ enum class DeviceProfile
 
 enum class EditableField
 {
+    type,
+    mode,
     channel,
     cc,
     minimum,
@@ -101,6 +103,10 @@ struct ControlConfiguration
     const ControlProfile& profile(DeviceProfile profile) const;
     std::string toJson(DeviceProfile profile) const;
 };
+
+const char* knobTypeName(std::uint8_t type);
+const char* sliderTypeName(std::uint8_t type);
+const char* buttonModeName(std::uint8_t mode);
 
 std::string controlDisplayName(ControlSelection selection);
 std::string trackButtonShortName(int buttonIndex);

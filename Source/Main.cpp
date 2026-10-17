@@ -48,20 +48,33 @@ private:
             {
                 if (main->hasUnsavedEdits())
                 {
-                    const auto quit = juce::AlertWindow::showOkCancelBox(
+                    if (quitChoiceOpen)
+                        return;
+                    quitChoiceOpen = true;
+                    // JUCE 9 leaves modal loops off, so the result arrives in the callback.
+                    juce::AlertWindow::showOkCancelBox(
                         juce::MessageBoxIconType::WarningIcon,
                         "Unsaved edits",
                         "Quit and discard CC / User edits that have not been written?",
                         "Quit",
                         "Stay",
                         this,
-                        nullptr);
-                    if (!quit)
-                        return;
+                        juce::ModalCallbackFunction::create(
+                            [safe = juce::Component::SafePointer<MainWindow>(this)](int result) {
+                                if (safe == nullptr)
+                                    return;
+                                safe->quitChoiceOpen = false;
+                                if (result == 1)
+                                    juce::JUCEApplication::getInstance()->systemRequestedQuit();
+                            }));
+                    return;
                 }
             }
             juce::JUCEApplication::getInstance()->systemRequestedQuit();
         }
+
+    private:
+        bool quitChoiceOpen = false;
     };
 
     std::unique_ptr<MainWindow> mainWindow;
