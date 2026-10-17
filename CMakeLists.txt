@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.22)
 
 set(CMAKE_OSX_DEPLOYMENT_TARGET "12.0" CACHE STRING "Minimum macOS version" FORCE)
-project(SMCMixerToolGUI VERSION 1.0.2 LANGUAGES C CXX OBJCXX)
+project(SMCMixerToolGUI VERSION 1.0.3 LANGUAGES C CXX OBJCXX)
 
 find_package(Git QUIET)
 set(SMC_BUILD_INFO "${CMAKE_BINARY_DIR}/generated/BuildInfo.h")
