@@ -436,7 +436,8 @@ void MainComponent::showAbout()
     auto box = juce::MessageBoxOptions::makeOptionsOk(
         juce::MessageBoxIconType::NoIcon, "SMC Mixer Tool",
         "Version " + juce::String(kSmcVersion)
-            + "\n\nReads and edits the CC / User profile of the M-VAVE SMC-Mixer over USB-C or Bluetooth.",
+            + "\n\nReads and edits the CC / User profile of the M-VAVE SMC-Mixer over USB-C or Bluetooth."
+              "\n\nFree software under the GNU AGPL, version 3. Source: https://github.com/deadjoe/SMC-Mixer-Tool",
         "OK", this);
     messageBox = juce::NativeMessageBox::showScopedAsync(box, nullptr);
 }

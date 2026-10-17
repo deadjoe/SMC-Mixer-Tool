@@ -102,4 +102,4 @@ The core tests cover the vendor frames, acknowledgements, the snapshot layout, f
 
 ## License
 
-Source in this repository is under the Apache License 2.0. See [LICENSE](LICENSE).
+SMC Mixer Tool is free software under the GNU Affero General Public License, version 3. See [LICENSE](LICENSE). It is built on JUCE, which is offered under the AGPLv3 or a commercial licence, so the app and its source are distributed under the AGPLv3 to match. Releases up to 1.0.3 were published under the Apache License 2.0.
