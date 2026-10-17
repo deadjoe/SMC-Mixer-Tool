@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DeviceModel.h"
+#include "MidiStream.h"
 
 #include <CoreMIDI/CoreMIDI.h>
 
@@ -77,7 +78,7 @@ private:
 
     std::mutex mutex;
     std::condition_variable condition;
-    Bytes responseBuffer;
+    SysExAssembler assembler;
     std::optional<Bytes> completedResponse;
     std::vector<Bytes> capturedResponses;
     bool capturing = false;

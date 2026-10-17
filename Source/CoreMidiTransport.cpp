@@ -1,47 +1,15 @@
 #include "CoreMidiTransport.h"
 
+#include "MidiStream.h"
+
 #include <algorithm>
-#include <cctype>
 #include <cstdlib>
 #include <cstring>
 #include <stdexcept>
 
-namespace
-{
-std::string lowercased(std::string value)
-{
-    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char character) {
-        return static_cast<char>(std::tolower(character));
-    });
-    return value;
-}
-
-bool containsCaseInsensitive(const std::string& value, const std::string& part)
-{
-    return lowercased(value).find(lowercased(part)) != std::string::npos;
-}
-}
-
 std::string MidiEndpointDescriptor::fullName() const
 {
-    // The mixer names its entity and endpoint alike ("-Private"), so skip a part already shown.
-    std::string result;
-    for (const auto* value : { &deviceName, &entityName, &endpointName })
-    {
-        if (value->empty() || *value == "(none)" || *value == "(unknown)")
-            continue;
-        if (containsCaseInsensitive(result, *value))
-            continue;
-        if (!result.empty() && containsCaseInsensitive(*value, result))
-        {
-            result = *value;
-            continue;
-        }
-        if (!result.empty())
-            result += ' ';
-        result += *value;
-    }
-    return result;
+    return midiname::join({ deviceName, entityName, endpointName });
 }
 
 CoreMidiTransport::~CoreMidiTransport()
@@ -108,7 +76,7 @@ bool CoreMidiTransport::findEndpoints(TransportKind transport,
     const auto* endpointKind = transport == TransportKind::usbC ? "Private" : "Bluetooth";
     const auto matches = [endpointKind](const MidiEndpointDescriptor& item) {
         const auto name = item.fullName();
-        return containsCaseInsensitive(name, "SMC-Mixer") && containsCaseInsensitive(name, endpointKind);
+        return midiname::containsIgnoringCase(name, "SMC-Mixer") && midiname::containsIgnoringCase(name, endpointKind);
     };
 
     const auto sourceList = sources();
@@ -131,7 +99,7 @@ Bytes CoreMidiTransport::query(TransportKind transport,
     open(transport);
     {
         std::lock_guard<std::mutex> lock(mutex);
-        responseBuffer.clear();
+        assembler.reset();
         completedResponse.reset();
         capturedResponses.clear();
         capturing = false;
@@ -170,7 +138,7 @@ std::vector<Bytes> CoreMidiTransport::sendAndCapture(TransportKind transport,
     open(transport);
     {
         std::lock_guard<std::mutex> lock(mutex);
-        responseBuffer.clear();
+        assembler.reset();
         completedResponse.reset();
         capturedResponses.clear();
         capturing = true;
@@ -222,7 +190,7 @@ std::vector<Bytes> CoreMidiTransport::sendAndCapture(TransportKind transport,
 
     std::lock_guard<std::mutex> lock(mutex);
     capturing = false;
-    responseBuffer.clear();
+    assembler.reset();
     return capturedResponses;
 }
 
@@ -256,7 +224,7 @@ void CoreMidiTransport::open(TransportKind transport)
         {
             std::lock_guard<std::mutex> lock(mutex);
             acceptingMidi = true;
-            responseBuffer.clear();
+            assembler.reset();
             completedResponse.reset();
             capturedResponses.clear();
             capturing = false;
@@ -306,45 +274,20 @@ void CoreMidiTransport::receive(const MIDIPacketList* packets)
     if (!acceptingMidi || packets == nullptr)
         return;
 
+    std::vector<Bytes> completed;
     auto* packet = &packets->packet[0];
-
     for (UInt32 index = 0; index < packets->numPackets; ++index)
     {
-        for (UInt16 byteIndex = 0; byteIndex < packet->length; ++byteIndex)
-        {
-            const auto byte = packet->data[byteIndex];
-            if (byte >= 0xf8)
-                continue;
-            if (byte == 0xf0)
-            {
-                responseBuffer = Bytes { byte };
-            }
-            else if (byte >= 0x80 && byte != 0xf7)
-            {
-                // Any other status byte ends an unfinished SysEx. Drop it rather than splice it.
-                responseBuffer.clear();
-            }
-            else if (!responseBuffer.empty())
-            {
-                if (responseBuffer.size() >= 65536)
-                {
-                    responseBuffer.clear();
-                    continue;
-                }
-                responseBuffer.push_back(byte);
-            }
-
-            if (byte == 0xf7 && responseBuffer.size() > 1)
-            {
-                completedResponse = responseBuffer;
-                if (capturing)
-                    capturedResponses.push_back(responseBuffer);
-                responseBuffer.clear();
-                condition.notify_all();
-            }
-        }
+        assembler.feed(packet->data, packet->length, completed);
         packet = MIDIPacketNext(packet);
     }
+    if (completed.empty())
+        return;
+
+    completedResponse = completed.back();
+    if (capturing)
+        capturedResponses.insert(capturedResponses.end(), completed.begin(), completed.end());
+    condition.notify_all();
 }
 
 void CoreMidiTransport::check(OSStatus status, const std::string& operation) const
