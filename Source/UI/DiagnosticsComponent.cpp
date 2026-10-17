@@ -138,7 +138,7 @@ void DiagnosticsComponent::adoptWorkingImage(const Bytes& image)
     }
     settingsFromRead = false;
     statusLabel.setColour(juce::Label::textColourId, mixerui::success);
-    statusLabel.setText("Write verified. Export uses this image.", juce::dontSendNotification);
+    statusLabel.setText("Write verified and saved. Export uses this image.", juce::dontSendNotification);
     render();
     updateEnabledState();
 }

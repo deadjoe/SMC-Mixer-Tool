@@ -310,7 +310,7 @@ void MainComponent::writeSettings()
     confirmThen(juce::MessageBoxIconType::QuestionIcon,
                 "Write settings",
                 "Write " + juce::String(count) + (count == 1 ? " changed record" : " changed records")
-                    + " to the SMC-Mixer over " + link + "? The mixer stays in its current mode.",
+                    + " to the SMC-Mixer over " + link + "? The mixer saves them and keeps its current mode.",
                 "Write",
                 "Cancel",
                 [this] { startWrite(); });
@@ -334,7 +334,8 @@ void MainComponent::startWrite()
     statusLabel.setColour(juce::Label::textColourId, mixerui::ink);
     statusLabel.setText("WRITING", juce::dontSendNotification);
     detailLabel.setColour(juce::Label::textColourId, mixerui::muted);
-    detailLabel.setText("Writing changed records, then reading them back.", juce::dontSendNotification);
+    detailLabel.setText("Writing changed records, reading them back, then saving them on the mixer.",
+                        juce::dontSendNotification);
     setBusy(true, true);
 }
 

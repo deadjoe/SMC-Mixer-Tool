@@ -1,5 +1,6 @@
 #include "ControlConfiguration.h"
 
+#include <iterator>
 #include <stdexcept>
 
 namespace
@@ -56,6 +57,47 @@ const char* buttonModeName(std::uint8_t mode)
         case 5: return "Note";
         default: return nullptr;
     }
+}
+
+const char* controlChangeName(std::uint8_t cc)
+{
+    static const char* const msb[] {
+        "Bank Select", "Modulation", "Breath Controller", "Undefined", "Foot Controller", "Portamento Time",
+        "Data Entry", "Channel Volume", "Balance", "Undefined", "Pan", "Expression", "Effect Control 1",
+        "Effect Control 2", "Undefined", "Undefined", "General Purpose 1", "General Purpose 2",
+        "General Purpose 3", "General Purpose 4", "Undefined", "Undefined", "Undefined", "Undefined",
+        "Undefined", "Undefined", "Undefined", "Undefined", "Undefined", "Undefined", "Undefined", "Undefined"
+    };
+    static const char* const lsb[] {
+        "Bank Select LSB", "Modulation LSB", "Breath Controller LSB", "Undefined LSB", "Foot Controller LSB",
+        "Portamento Time LSB", "Data Entry LSB", "Channel Volume LSB", "Balance LSB", "Undefined LSB", "Pan LSB",
+        "Expression LSB", "Effect Control 1 LSB", "Effect Control 2 LSB", "Undefined LSB", "Undefined LSB",
+        "General Purpose 1 LSB", "General Purpose 2 LSB", "General Purpose 3 LSB", "General Purpose 4 LSB",
+        "Undefined LSB", "Undefined LSB", "Undefined LSB", "Undefined LSB", "Undefined LSB", "Undefined LSB",
+        "Undefined LSB", "Undefined LSB", "Undefined LSB", "Undefined LSB", "Undefined LSB", "Undefined LSB"
+    };
+    static const char* const upper[] {
+        "Sustain", "Portamento", "Sostenuto", "Soft Pedal", "Legato", "Hold 2",
+        "Sound Variation", "Timbre", "Release Time", "Attack Time", "Brightness", "Decay Time",
+        "Vibrato Rate", "Vibrato Depth", "Vibrato Delay", "Sound Controller 10",
+        "General Purpose 5", "General Purpose 6", "General Purpose 7", "General Purpose 8", "Portamento Control",
+        "Undefined", "Undefined", "Undefined", "High Resolution Velocity", "Undefined", "Undefined",
+        "Reverb Depth", "Tremolo Depth", "Chorus Depth", "Detune Depth", "Phaser Depth",
+        "Data Increment", "Data Decrement", "NRPN LSB", "NRPN MSB", "RPN LSB", "RPN MSB",
+        "Undefined", "Undefined", "Undefined", "Undefined", "Undefined", "Undefined", "Undefined", "Undefined",
+        "Undefined", "Undefined", "Undefined", "Undefined", "Undefined", "Undefined", "Undefined", "Undefined",
+        "Undefined", "Undefined", "All Sound Off", "Reset All Controllers", "Local Control", "All Notes Off", "Omni Off", "Omni On",
+        "Mono On", "Poly On"
+    };
+    static_assert(std::size(msb) == 32 && std::size(lsb) == 32 && std::size(upper) == 64,
+                  "Each MIDI CC range needs one name per number");
+    if (cc < 32)
+        return msb[cc];
+    if (cc < 64)
+        return lsb[cc - 32];
+    if (cc < 128)
+        return upper[cc - 64];
+    return "Out of range";
 }
 
 ControlConfiguration ControlConfiguration::parse(const Bytes& data)

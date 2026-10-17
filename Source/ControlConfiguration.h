@@ -107,6 +107,8 @@ struct ControlConfiguration
 const char* knobTypeName(std::uint8_t type);
 const char* sliderTypeName(std::uint8_t type);
 const char* buttonModeName(std::uint8_t mode);
+// The MIDI 1.0 name of a control change number, or "Undefined".
+const char* controlChangeName(std::uint8_t cc);
 
 std::string controlDisplayName(ControlSelection selection);
 std::string trackButtonShortName(int buttonIndex);

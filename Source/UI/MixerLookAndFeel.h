@@ -48,4 +48,30 @@ public:
     static juce::Font font(float height, bool bold = false);
     juce::Font getTextButtonFont(juce::TextButton&, int buttonHeight) override;
     int getSliderThumbRadius(juce::Slider& slider) override;
+
+    // Combo boxes and their menus: a flat faceplate field and a compact list,
+    // sized by the font rather than by the height of the box.
+    void drawComboBox(juce::Graphics&, int width, int height, bool isButtonDown,
+                      int buttonX, int buttonY, int buttonW, int buttonH, juce::ComboBox&) override;
+    juce::Font getComboBoxFont(juce::ComboBox&) override;
+    void positionComboBoxText(juce::ComboBox&, juce::Label&) override;
+    juce::PopupMenu::Options getOptionsForComboBoxPopupMenu(juce::ComboBox&, juce::Label&) override;
+    juce::Font getPopupMenuFont() override;
+    int getPopupMenuBorderSize() override;
+    void drawPopupMenuBackground(juce::Graphics&, int width, int height) override;
+    void getIdealPopupMenuItemSize(const juce::String& text, bool isSeparator, int standardMenuItemHeight,
+                                   int& idealWidth, int& idealHeight) override;
+    void drawPopupMenuItem(juce::Graphics&, const juce::Rectangle<int>& area,
+                           bool isSeparator, bool isActive, bool isHighlighted, bool isTicked, bool hasSubMenu,
+                           const juce::String& text, const juce::String& shortcutKeyText,
+                           const juce::Drawable* icon, const juce::Colour* textColour) override;
+
+    // Number boxes beside the edit sliders match the combo box field.
+    juce::Label* createSliderTextBox(juce::Slider&) override;
+    void drawLabel(juce::Graphics&, juce::Label&) override;
+    void fillTextEditorBackground(juce::Graphics&, int width, int height, juce::TextEditor&) override;
+    void drawTextEditorOutline(juce::Graphics&, int width, int height, juce::TextEditor&) override;
+
+    static constexpr int fieldHeight = 30;
+    static constexpr float fieldCorner = 6.0f;
 };

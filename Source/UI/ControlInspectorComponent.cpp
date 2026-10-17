@@ -21,18 +21,12 @@ juce::String namedValue(const char* name, std::uint8_t value)
 
 juce::String ccText(std::uint8_t value)
 {
-    juce::String description = "Undefined";
-    switch (value)
-    {
-        case 0: description = "Bank Select"; break;
-        case 1: description = "Modulation"; break;
-        case 7: description = "Channel Volume"; break;
-        case 10: description = "Pan"; break;
-        case 11: description = "Expression"; break;
-        case 40: description = "Balance LSB"; break;
-        default: break;
-    }
-    return number(value) + " / " + description;
+    return number(value) + " / " + controlChangeName(value);
+}
+
+juce::String ccCaption(std::uint8_t value)
+{
+    return juce::String::fromUTF8("CC  \xc2\xb7  ") + juce::String(controlChangeName(value)).toUpperCase();
 }
 
 bool wholeNumber(const juce::String& text, int minimum, int maximum, int& parsed)
@@ -102,7 +96,7 @@ ControlInspectorComponent::ControlInspectorComponent()
     exportButton.onClick = [this] { exportProfile(); };
     copyButton.onClick = [this] { copyProfile(); };
     revertButton.setTooltip("Restore this control in the profile you are viewing.");
-    writeButton.setTooltip("Write changed CC / User records and read them back.");
+    writeButton.setTooltip("Write changed CC / User records, read them back, and save them on the mixer.");
     exportButton.setTooltip("Save the profile you are viewing as a JSON file.");
     copyButton.setTooltip("Copy the profile you are viewing to the clipboard as JSON.");
     addAndMakeVisible(ccUserButton);
@@ -118,6 +112,7 @@ ControlInspectorComponent::ControlInspectorComponent()
         auto& value = fieldValues[static_cast<std::size_t>(index)];
         name.setFont(MixerLookAndFeel::font(10.0f, true));
         name.setColour(juce::Label::textColourId, mixerui::muted);
+        name.setMinimumHorizontalScale(0.7f);
         value.setFont(MixerLookAndFeel::font(14.0f, true));
         value.setMinimumHorizontalScale(0.55f);
         addAndMakeVisible(name);
@@ -125,7 +120,7 @@ ControlInspectorComponent::ControlInspectorComponent()
 
         auto& editor = editors[static_cast<std::size_t>(index)];
         editor.setSliderStyle(juce::Slider::LinearHorizontal);
-        editor.setTextBoxStyle(juce::Slider::TextBoxRight, false, 52, 20);
+        editor.setTextBoxStyle(juce::Slider::TextBoxRight, false, 56, MixerLookAndFeel::fieldHeight);
         editor.setScrollWheelEnabled(true);
         editor.setSliderSnapsToMousePosition(true);
         editor.setDoubleClickReturnValue(false, 0.0);
@@ -134,7 +129,7 @@ ControlInspectorComponent::ControlInspectorComponent()
         editor.setColour(juce::Slider::trackColourId, mixerui::slot);
         editor.setColour(juce::Slider::thumbColourId, mixerui::knobOutline);
         editor.setColour(juce::Slider::textBoxTextColourId, mixerui::ink);
-        editor.setColour(juce::Slider::textBoxBackgroundColourId, mixerui::plate);
+        editor.setColour(juce::Slider::textBoxBackgroundColourId, mixerui::shell);
         editor.setColour(juce::Slider::textBoxOutlineColourId, mixerui::hairline);
         editor.setRange(0.0, 127.0, 1.0);
         editor.onValueChange = [this, index] { handleEditor(index); };
@@ -143,6 +138,7 @@ ControlInspectorComponent::ControlInspectorComponent()
     }
 
     choiceBox.setVisible(false);
+    choiceBox.setMouseCursor(juce::MouseCursor::PointingHandCursor);
     choiceBox.onChange = [this] {
         if (suppressChoiceCallbacks || !choiceField || !onControlEdited || !hasSelection)
             return;
@@ -219,6 +215,7 @@ void ControlInspectorComponent::selectControl(ControlSelection selection)
     selected = selection;
     hasSelection = true;
     refreshFields();
+    repaint();
 
     if (!configuration && !loading && !writing && onSettingsRequired)
         onSettingsRequired();
@@ -411,6 +408,8 @@ void ControlInspectorComponent::setEditor(int index,
         return static_cast<double>(asChannel ? parsed - 1 : parsed);
     };
     editor.setValue(static_cast<double>(value), juce::dontSendNotification);
+    // setValue() leaves the text alone when the value is unchanged, so a channel would still show 0.
+    editor.updateText();
     editor.setEnabled(!writing);
     editor.setVisible(true);
     suppressEditorCallbacks = false;
@@ -424,6 +423,8 @@ void ControlInspectorComponent::handleEditor(int index)
     if (!field)
         return;
     const auto value = static_cast<std::uint8_t>(juce::roundToInt(editors[static_cast<std::size_t>(index)].getValue()));
+    if (*field == EditableField::cc)
+        fieldNames[static_cast<std::size_t>(index)].setText(ccCaption(value), juce::dontSendNotification);
     onControlEdited(selected, activeProfile, *field, value);
 }
 
@@ -458,7 +459,7 @@ void ControlInspectorComponent::updateStatus()
     if (writing)
     {
         const auto percent = juce::roundToInt(juce::jlimit(0.0, 1.0, writeProgress) * 100.0);
-        show("Writing changed records and reading them back... " + juce::String(percent) + "%", mixerui::ink);
+        show("Writing, checking, and saving changed records... " + juce::String(percent) + "%", mixerui::ink);
         return;
     }
     if (loading)
@@ -557,7 +558,7 @@ void ControlInspectorComponent::refreshFields()
                 setField(0, "TYPE", namedValue(knobTypeName(knob.type), knob.type));
             setField(1, "SPEED", knob.speed == 2 ? juce::String("Normal") : number(knob.speed));
             showValue(2, "CHANNEL", channel(knob.channel), EditableField::channel, knob.channel, 15, true);
-            showValue(3, "CC", ccText(knob.cc), EditableField::cc, knob.cc, 127, false);
+            showValue(3, showEditors ? ccCaption(knob.cc) : "CC", ccText(knob.cc), EditableField::cc, knob.cc, 127, false);
             showValue(4, "MIN", number(knob.minimum), EditableField::minimum, knob.minimum, 127, false);
             showValue(5, "MAX", number(knob.maximum), EditableField::maximum, knob.maximum, 127, false);
             break;
@@ -570,7 +571,7 @@ void ControlInspectorComponent::refreshFields()
             else
                 setField(0, "TYPE", namedValue(sliderTypeName(slider.type), slider.type));
             showValue(1, "CHANNEL", channel(slider.channel), EditableField::channel, slider.channel, 15, true);
-            showValue(2, "CC", ccText(slider.cc), EditableField::cc, slider.cc, 127, false);
+            showValue(2, showEditors ? ccCaption(slider.cc) : "CC", ccText(slider.cc), EditableField::cc, slider.cc, 127, false);
             showValue(3, "MIN", number(slider.minimum), EditableField::minimum, slider.minimum, 127, false);
             showValue(4, "MAX", number(slider.maximum), EditableField::maximum, slider.maximum, 127, false);
             break;
@@ -586,7 +587,7 @@ void ControlInspectorComponent::refreshFields()
             else
                 setField(0, "MODE", namedValue(buttonModeName(button.mode), button.mode));
             showValue(1, "CHANNEL", channel(button.channel), EditableField::channel, button.channel, 15, true);
-            showValue(2, "CC", ccText(button.cc), EditableField::cc, button.cc, 127, false);
+            showValue(2, showEditors ? ccCaption(button.cc) : "CC", ccText(button.cc), EditableField::cc, button.cc, 127, false);
             showValue(3, "VALUE 1", number(button.value1), EditableField::value1, button.value1, 127, false);
             showValue(4, "VALUE 2", number(button.value2), EditableField::value2, button.value2, 127, false);
             showValue(5, "LED", number(button.led), EditableField::led, button.led, 255, false);
@@ -650,8 +651,9 @@ void ControlInspectorComponent::resized()
         fieldNames[static_cast<std::size_t>(index)].setBounds(field.removeFromTop(16));
         field.removeFromTop(4);
         fieldValues[static_cast<std::size_t>(index)].setBounds(field);
-        editors[static_cast<std::size_t>(index)].setBounds(field);
+        const auto control = field.withSizeKeepingCentre(field.getWidth(), MixerLookAndFeel::fieldHeight);
+        editors[static_cast<std::size_t>(index)].setBounds(control);
         if (choiceBox.isVisible() && choiceIndex == index)
-            choiceBox.setBounds(field);
+            choiceBox.setBounds(control);
     }
 }

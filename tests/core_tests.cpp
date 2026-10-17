@@ -8,6 +8,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 
 namespace
 {
@@ -113,6 +114,16 @@ int main()
         bad.back() = 0x00;
         SettingsProtocol::parseWriteAcknowledgement({ bad });
     }, "checksum");
+    const std::pair<int, const char*> ccNames[] {
+        { 0, "Bank Select" }, { 1, "Modulation" }, { 7, "Channel Volume" }, { 16, "General Purpose 1" },
+        { 31, "Undefined" }, { 40, "Balance LSB" }, { 64, "Sustain" }, { 74, "Brightness" },
+        { 88, "High Resolution Velocity" }, { 91, "Reverb Depth" }, { 95, "Phaser Depth" },
+        { 98, "NRPN LSB" }, { 101, "RPN MSB" }, { 102, "Undefined" }, { 119, "Undefined" },
+        { 120, "All Sound Off" }, { 123, "All Notes Off" }, { 127, "Poly On" }
+    };
+    for (const auto& [cc, name] : ccNames)
+        expect(std::string(controlChangeName(static_cast<std::uint8_t>(cc))) == name, name);
+
     expectThrow("empty write", [] { SettingsProtocol::writePayload(0, {}); }, "Write length");
     // Captured from Midi Suite 1.15.0 over USB-C, right after its data write.
     const Bytes saveFrame {
