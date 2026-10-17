@@ -14,6 +14,7 @@ public:
                            std::uint32_t address = 0,
                            std::uint32_t length = 6282);
     static Bytes writePayload(std::uint32_t address, const Bytes& data, std::uint8_t flashType = 5);
+    static Bytes savePayload(std::uint8_t flashType = 5);
     static Bytes sysEx(const Bytes& payload);
     static Bytes writeSysEx(std::uint32_t address, const Bytes& data, std::uint8_t flashType = 5);
     static SettingsReadResult parseResponses(const std::vector<Bytes>& messages);

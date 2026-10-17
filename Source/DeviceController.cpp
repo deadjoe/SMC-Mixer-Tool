@@ -298,7 +298,7 @@ void DeviceController::executeWrite(TransportKind transport, const std::vector<S
             throw std::runtime_error("A changed record has an invalid address or length");
     }
 
-    const auto steps = spans.size() * 2;
+    const auto steps = spans.size() * 2 + 1;
     std::size_t step = 0;
     const auto report = [&](std::size_t completed) {
         DeviceEvent progressEvent;
@@ -379,6 +379,34 @@ void DeviceController::executeWrite(TransportKind transport, const std::vector<S
         verified.push_back(span);
         ++step;
     }
+
+    // Read-back only proves the RAM copy. Without this save the edits are gone after power-off.
+    report(step);
+    bool saved = false;
+    std::string saveError = "No save acknowledgement was received";
+    for (int attempt = 0; attempt < 2 && !saved; ++attempt)
+    {
+        if (threadShouldExit() || stop.load())
+            return;
+        try
+        {
+            const auto messages = exchange(transport,
+                                            SettingsProtocol::savePayload(),
+                                            std::chrono::milliseconds { 3000 },
+                                            12.0,
+                                            acknowledgementReady);
+            SettingsProtocol::parseWriteAcknowledgement(messages);
+            saved = true;
+        }
+        catch (const std::exception& error)
+        {
+            saveError = error.what();
+            if (saveError.find("rejected the write") != std::string::npos)
+                throw std::runtime_error("The mixer took the edits but refused to save them to flash");
+        }
+    }
+    if (!saved)
+        throw std::runtime_error("The edits reached the mixer but were not saved to flash: " + saveError);
 
     if (threadShouldExit() || stop.load())
         return;

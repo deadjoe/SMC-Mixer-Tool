@@ -57,12 +57,10 @@ Bytes SettingsProtocol::sysEx(const Bytes& payload)
     return message;
 }
 
-Bytes SettingsProtocol::writePayload(std::uint32_t address, const Bytes& data, std::uint8_t flashType)
+namespace
 {
-    // Command 0x22. USB-C wraps the result with sysEx(). Bluetooth sends these bytes unchanged.
-    if (data.empty() || data.size() > 256)
-        throw std::runtime_error("Write length is invalid");
-
+Bytes writeFrame(std::uint32_t address, const Bytes& data, std::uint8_t flashType)
+{
     Bytes body {
         flashType,
         static_cast<std::uint8_t>(address & 0xff),
@@ -85,6 +83,23 @@ Bytes SettingsProtocol::writePayload(std::uint32_t address, const Bytes& data, s
     payload.insert(payload.end(), body.begin(), body.end());
     payload.push_back(VendorProtocol::checksum(body));
     return payload;
+}
+}
+
+Bytes SettingsProtocol::writePayload(std::uint32_t address, const Bytes& data, std::uint8_t flashType)
+{
+    // Command 0x22. USB-C wraps the result with sysEx(). Bluetooth sends these bytes unchanged.
+    // The mixer acknowledges it at once, but the bytes stay in RAM until savePayload().
+    if (data.empty() || data.size() > 256)
+        throw std::runtime_error("Write length is invalid");
+    return writeFrame(address, data, flashType);
+}
+
+Bytes SettingsProtocol::savePayload(std::uint8_t flashType)
+{
+    // Command 0x22 with address 0 and no data. Midi Suite sends this after its writes.
+    // The mixer then commits RAM to flash and acknowledges after about 60 ms.
+    return writeFrame(0, {}, flashType);
 }
 
 Bytes SettingsProtocol::writeSysEx(std::uint32_t address, const Bytes& data, std::uint8_t flashType)

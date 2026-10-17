@@ -114,6 +114,16 @@ int main()
         SettingsProtocol::parseWriteAcknowledgement({ bad });
     }, "checksum");
     expectThrow("empty write", [] { SettingsProtocol::writePayload(0, {}); }, "Write length");
+    // Captured from Midi Suite 1.15.0 over USB-C, right after its data write.
+    const Bytes saveFrame {
+        0x00, 0x59, 0x22, 0x08, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFA
+    };
+    const Bytes saveSysEx {
+        0xF0, 0x00, 0x32, 0x09, 0x41, 0x00, 0x00, 0x40, 0x02, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x7A, 0x01, 0xF7
+    };
+    expect(SettingsProtocol::savePayload() == saveFrame, "save frame");
+    expect(SettingsProtocol::sysEx(saveFrame) == saveSysEx, "save sysex");
     expectThrow("oversized write", [] { SettingsProtocol::writePayload(0, Bytes(257, 1)); }, "Write length");
     expect(SettingsProtocol::writePayload(6194, knob).size() == 21, "knob frame is 21 bytes");
     expect(SettingsProtocol::writePayload(0, Bytes(layout::sliderSize, 1)).size() == 20, "slider frame is 20 bytes");

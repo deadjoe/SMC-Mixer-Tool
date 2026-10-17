@@ -440,7 +440,7 @@ void MainComponent::handleEvent(DeviceEvent event)
                                                 : "WRITE VERIFIED",
                                     juce::dontSendNotification);
                 detailLabel.setColour(juce::Label::textColourId, mixerui::success);
-                detailLabel.setText("Write verified. Read-back matches the edited records.",
+                detailLabel.setText("Write verified and saved. Read-back matches, and the mixer stored it in flash.",
                                     juce::dontSendNotification);
             }
             catch (const std::exception& error)

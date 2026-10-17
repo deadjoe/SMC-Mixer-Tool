@@ -16,7 +16,7 @@ Connect the mixer with USB-C or Bluetooth and open the app. It reads a 6,282-byt
 
 CC / User and DAW on the inspector choose which stored profile is on screen. The mixer's live mode stays where it is. On the hardware, hold Shift and press Left or Right.
 
-In the CC / User view you can edit channel, CC, minimum, and maximum. Buttons also have value 1, value 2, and LED. Revert restores the selected control. Write sends only the records that changed, then reads those addresses back and checks them. USB-C carries the payload as SysEx on the Private port. Bluetooth sends the same payload on the vendor channel. The DAW view is read-only.
+In the CC / User view you can edit channel, CC, minimum, and maximum. Buttons also have value 1, value 2, and LED. Revert restores the selected control. Write sends only the records that changed, reads those addresses back and checks them, then tells the mixer to save to flash so the edits survive a power cycle. USB-C carries the payload as SysEx on the Private port. Bluetooth sends the same payload on the vendor channel. The DAW view is read-only.
 
 Export saves the profile you are viewing as JSON. Copy puts that JSON on the clipboard. Channels in the file are numbered from 1.
 
