@@ -2,7 +2,7 @@
 
 macOS app for the M-VAVE SMC-Mixer ([Wireless DAW Control Surface](https://www.m-vave.com/product?id=smc-mixer)). It reads the device identity and both stored profiles over USB-C or Bluetooth, edits the CC / User profile, and writes the changed records back.
 
-![SMC Mixer Tool connected to an SMC-Mixer over USB-C, with knob 2 selected as a CC Rel knob](docs/screenshot.png)
+![SMC Mixer Tool connected to an SMC-Mixer over Bluetooth, with knob 1 selected as a CC Rel knob](docs/screenshot.png)
 
 ## Download
 
@@ -12,11 +12,11 @@ The app is not notarized. The first time you open it, Control-click SMC Mixer To
 
 ## Use
 
-Connect the mixer with USB-C or Bluetooth and open the app. It finds the mixer on the link chosen at the top right, reads its identity, then reads a 6,282-byte settings image: the DAW profile, then the CC / User profile, 3,141 bytes each. The bar across the top says whether the mixer is online, what the app is doing, and what the link reports: the USB-C port, or battery and signal over Bluetooth. Refresh reads everything again.
+Connect the mixer with USB-C or Bluetooth and open the app. It finds the mixer on the link chosen at the top right, reads its identity, then reads a 6,282-byte settings image: the DAW profile, then the CC / User profile, 3,141 bytes each. The bar across the top says whether the mixer is online, what the app is doing, and what the link reports: the USB-C port, or battery, signal, and manufacturer over Bluetooth. Refresh reads everything again.
 
 Unplugging the USB-C cable shows at once, and plugging it back in reconnects. With unsaved edits only the identity is read again, so the edits stay and Write can send them. A dropped Bluetooth link is reported too; Refresh connects again.
 
-The panel draws the mixer as it is laid out: eight channels of a knob over a fader and its Mute, Solo, Record, and Select keys, then the transport keys. Each control shows what is stored for it. A knob shows its CC number, its type, and its Min to Max range on the ring. A fader shows its range on the slot. When the window is tall enough, each key also shows the CC, note, or program it sends. Click a control, or move between them with the arrow keys, to see all of its settings below. The panel only selects a control. It does not send performance MIDI.
+The panel draws the mixer as it is laid out: eight channels of a knob over a fader and its Mute, Solo, Record, and Select keys, then the transport keys. Each control shows what is stored for it. A knob shows its CC number, or AT or PB for the types that send no CC, with its type and channel below and its Min to Max range on the ring. A fader shows the same below its slot, and its range on the slot. When the window is tall enough, each key also shows the CC, note, or program it sends. Click a control, or move between them with the arrow keys, to see all of its settings below. The panel only selects a control. It does not send performance MIDI.
 
 CC / User and DAW, at the top left of the panel, choose which stored profile is on screen. The mixer's live mode stays where it is. The M-VAVE manual switches it by holding Shift and pressing Left or Right.
 
