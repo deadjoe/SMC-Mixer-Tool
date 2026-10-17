@@ -20,7 +20,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Configure
-        run: cmake -S . -B build
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
 
       - name: Build tests
         run: cmake --build build --target SMCMixerCoreTests SMCMixerUITests -j 4

@@ -3,6 +3,13 @@ cmake_minimum_required(VERSION 3.22)
 set(CMAKE_OSX_DEPLOYMENT_TARGET "12.0" CACHE STRING "Minimum macOS version" FORCE)
 project(SMCMixerToolGUI VERSION 1.0.3 LANGUAGES C CXX OBJCXX)
 
+# JUCE puts each artefact in a folder named for the configuration. Without a build type a
+# single-configuration generator leaves that folder out, so default to Debug.
+get_property(SMC_MULTI_CONFIG GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+if(NOT SMC_MULTI_CONFIG AND NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Debug CACHE STRING "Build type" FORCE)
+endif()
+
 find_package(Git QUIET)
 set(SMC_BUILD_INFO "${CMAKE_BINARY_DIR}/generated/BuildInfo.h")
 add_custom_target(SMCBuildInfo
