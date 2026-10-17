@@ -2,7 +2,7 @@
 
 macOS app for the M-VAVE SMC-Mixer ([Wireless DAW Control Surface](https://www.m-vave.com/product?id=smc-mixer)). It reads the device identity and both stored profiles over USB-C or Bluetooth, edits the CC / User profile, and writes the changed records back.
 
-![SMC Mixer Tool connected to an SMC-Mixer over Bluetooth](docs/screenshot.png)
+![SMC Mixer Tool connected to an SMC-Mixer over USB-C, with knob 1 set to CC Rel](docs/screenshot.png)
 
 ## Download
 
