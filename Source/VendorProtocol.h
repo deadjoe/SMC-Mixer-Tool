@@ -42,6 +42,10 @@ public:
     // Payloads from USB-C SysEx and from raw Bluetooth replies alike. Other messages are skipped.
     static std::vector<Bytes> vendorPayloads(const std::vector<Bytes>& messages);
 
+    // Splits a payload into writes no longer than a Bluetooth link allows, in order. The
+    // mixer reads a frame's length from its header, so the pieces arrive as one frame.
+    static std::vector<Bytes> fragments(const Bytes& payload, std::size_t maximumWrite);
+
     static Bytes versionQueryPayload();
     static VersionInfo parseVersionResponse(const Bytes& message);
     static VersionInfo parseVersionPayload(const Bytes& payload);

@@ -3,6 +3,7 @@
 #include "MidiStream.h"
 #include "SettingsDocument.h"
 #include "SettingsProtocol.h"
+#include "SettingsReader.h"
 #include "SettingsWriter.h"
 #include "VendorProtocol.h"
 
@@ -300,6 +301,9 @@ void testMidiStream()
     expect(midiname::join({ "SMC-Mixer", "SMC-Mixer -Master", "-Master" }) == "SMC-Mixer -Master", "longer entity name");
     expect(midiname::join({ "(none)", "-Private", "(unknown)" }) == "-Private", "placeholders are skipped");
     expect(midiname::containsIgnoringCase("SMC-Mixer -Private", "private"), "port match ignores case");
+    expect(midiname::isMixerName("SMC-Mixer") && midiname::isMixerName("smc-mixer Bluetooth")
+               && midiname::isMixerName("SMC-MIXER-2F"), "mixer name match");
+    expect(!midiname::isMixerName("SMC Mixer Tool") && !midiname::isMixerName("IAC Driver"), "other names");
 }
 
 void testFieldLimits()
@@ -407,6 +411,17 @@ void testFrames()
     expect(SettingsProtocol::writePayload(6194, knobRecord).size() == 21, "knob frame is 21 bytes");
     expect(SettingsProtocol::writePayload(0, Bytes(layout::sliderSize, 1)).size() == 20, "slider frame is 20 bytes");
     expect(SettingsProtocol::writePayload(0, Bytes(layout::buttonSize, 1)).size() == 86, "button frame is 86 bytes");
+
+    // A button frame over a Bluetooth link that takes 20 bytes per write: 20, 20, 20, 20, 6.
+    const auto frame = SettingsProtocol::writePayload(0, Bytes(layout::buttonSize, 1));
+    const auto pieces = VendorProtocol::fragments(frame, 20);
+    expect(pieces.size() == 5 && pieces.back().size() == 6, "a long frame is split to the write limit");
+    Bytes joined;
+    for (const auto& piece : pieces)
+        joined.insert(joined.end(), piece.begin(), piece.end());
+    expect(joined == frame, "the pieces join back into the frame");
+    expect(VendorProtocol::fragments(frame, 182).size() == 1, "a frame within the limit goes whole");
+    expect(VendorProtocol::fragments(frame, 0).size() == 1, "an unknown limit sends the frame whole");
 }
 
 void testAcknowledgements()
@@ -777,6 +792,169 @@ void testDescriptions()
     expect(describe(profile, { ControlKind::trackButton, 0 }).find("Off value 0") != std::string::npos, "button values described");
 }
 
+// A mixer answering reads of its image, with faults to inject.
+struct FakeReader
+{
+    Bytes image = Bytes(layout::snapshotSize);
+    std::vector<std::uint32_t> requests;
+    int dropAt = -1;          // address whose first request gets no reply
+    int dropCount = 0;        // how many requests at that address are dropped
+    bool throwOnce = false;   // the first request throws, as a Bluetooth timeout does
+    bool garbleFirst = false; // the first reply has a bad checksum
+
+    std::vector<Bytes> answer(std::uint32_t address, std::uint32_t length)
+    {
+        requests.push_back(address);
+        if (throwOnce)
+        {
+            throwOnce = false;
+            throw std::runtime_error("Timed out waiting for the AE42 vendor reply");
+        }
+        if (static_cast<int>(address) == dropAt && dropCount > 0)
+        {
+            --dropCount;
+            return { framed(0x23, { 0x00 }) };
+        }
+        Bytes data(image.begin() + address, image.begin() + address + length);
+        auto reply = settingsChunk(address, data);
+        if (garbleFirst)
+        {
+            garbleFirst = false;
+            reply.back() ^= 0xff;
+        }
+        return { VendorProtocol::sysEx(reply) };
+    }
+
+    SettingsReader::Exchange exchange()
+    {
+        return [this](std::uint32_t address, std::uint32_t length) { return answer(address, length); };
+    }
+};
+
+void testReader()
+{
+    FakeReader mixer;
+    for (std::size_t index = 0; index < mixer.image.size(); ++index)
+        mixer.image[index] = static_cast<std::uint8_t>(index * 7);
+    // Keep every button message length valid, as a real image has.
+    for (std::size_t profile = 0; profile < layout::profileCount; ++profile)
+        for (std::size_t button = 0; button < layout::buttonCount; ++button)
+            mixer.image[profile * layout::profileSize + button * layout::buttonSize + 5] = 3;
+
+    std::vector<double> progress;
+    const auto result = SettingsReader::read(mixer.exchange(), [&](double value) { progress.push_back(value); });
+    expect(result && result->data == mixer.image, "reader assembles the image");
+    expect(result && result->chunkCount == 7, "seven chunks");
+    expect(mixer.requests.size() == 7, "one request per chunk");
+    expect(!progress.empty() && progress.back() == 1.0 && std::is_sorted(progress.begin(), progress.end()), "read progress");
+
+    FakeReader dropped = mixer;
+    dropped.requests.clear();
+    dropped.dropAt = static_cast<int>(layout::readChunkSize * 3);
+    dropped.dropCount = 1;
+    const auto retried = SettingsReader::read(dropped.exchange());
+    expect(retried && retried->data == mixer.image, "a dropped chunk is read again");
+    expect(dropped.requests.size() == 8, "only the dropped chunk is asked twice");
+    expect(retried && retried->acknowledgementCount == 0, "the empty reply is not kept");
+
+    FakeReader timedOut = mixer;
+    timedOut.throwOnce = true;
+    expect(SettingsReader::read(timedOut.exchange()).has_value(), "a link timeout is retried");
+
+    FakeReader garbled = mixer;
+    garbled.garbleFirst = true;
+    expect(SettingsReader::read(garbled.exchange()).has_value(), "a corrupt reply is retried");
+
+    FakeReader lost = mixer;
+    lost.dropAt = static_cast<int>(layout::readChunkSize);
+    lost.dropCount = SettingsReader::attemptsPerChunk;
+    expectThrow("a chunk that never arrives", [&] { SettingsReader::read(lost.exchange()); }, "at address 1009");
+
+    FakeReader cancelled = mixer;
+    int checks = 0;
+    expect(!SettingsReader::read(cancelled.exchange(), {}, [&] { return ++checks > 3; }), "cancel stops the read");
+}
+
+void testSerialization()
+{
+    Bytes image(layout::snapshotSize);
+    for (std::size_t index = 0; index < image.size(); ++index)
+        image[index] = static_cast<std::uint8_t>((index * 31) ^ (index >> 3));
+    for (std::size_t profile = 0; profile < layout::profileCount; ++profile)
+        for (std::size_t button = 0; button < layout::buttonCount; ++button)
+            image[profile * layout::profileSize + button * layout::buttonSize + 5] = static_cast<std::uint8_t>(button % 65);
+
+    const auto configuration = ControlConfiguration::parse(image);
+    auto rebuilt = image;
+    for (const auto profile : { DeviceProfile::daw, DeviceProfile::ccUser })
+        ControlConfiguration::writeProfile(configuration.profile(profile), profile, rebuilt);
+    expect(rebuilt == image, "writing a parsed profile gives back the same bytes");
+
+    auto edited = configuration.profile(DeviceProfile::ccUser);
+    edited.knobs[2].cc = 99;
+    edited.buttons[40].dawMessage = { 0xf0, 0x01, 0xf7 };
+    ControlConfiguration::writeProfile(edited, DeviceProfile::ccUser, rebuilt);
+    const auto reparsed = ControlConfiguration::parse(rebuilt);
+    expect(reparsed.profile(DeviceProfile::ccUser).knobs[2].cc == 99, "written knob cc");
+    expect(reparsed.profile(DeviceProfile::ccUser).buttons[40].dawMessage == Bytes({ 0xf0, 0x01, 0xf7 }), "written message");
+    expect(std::equal(image.begin(), image.begin() + static_cast<std::ptrdiff_t>(layout::profileSize), rebuilt.begin()),
+           "the other profile is untouched");
+
+    auto tooLong = edited;
+    tooLong.buttons[0].dawMessage = Bytes(layout::buttonMessageCapacity + 1, 1);
+    expectThrow("long message", [&] { ControlConfiguration::writeProfile(tooLong, DeviceProfile::ccUser, rebuilt); }, "longer");
+}
+
+void testImport()
+{
+    const auto image = snapshotWith(knobAddress, knobRecord);
+    SettingsDocument document;
+    expect(!document.importImage(image).applied, "nothing to import into before a read");
+    document.load(image);
+
+    auto profile = document.configuration().profile(DeviceProfile::ccUser);
+    profile.knobs[0].cc = 64;
+    profile.sliders[2].maximum = 100;
+    profile.buttons[33].mode = 3;
+    const auto imported = document.importProfile(profile);
+    expect(imported.applied && imported.message.find("3 records differ") != std::string::npos, "profile imported");
+    expect(document.workingBytes()[knobAddress + 3] == 64, "imported cc");
+    expect(document.dirtySpans().size() == 3, "three records to write");
+    expect(document.undo() && !document.isDirty(), "an import is one undo step");
+    expect(document.redo() && document.dirtySpans().size() == 3, "and redo brings it back");
+
+    auto same = document.configuration().profile(DeviceProfile::ccUser);
+    expect(!document.importProfile(same).applied, "an identical profile changes nothing");
+
+    auto badChannel = same;
+    badChannel.sliders[0].channel = 16;
+    const auto refused = document.importProfile(badChannel);
+    expect(!refused.applied && refused.message.find("Fader 1") != std::string::npos, "out-of-range channel refused");
+    auto inverted = same;
+    inverted.knobs[3].minimum = 100;
+    inverted.knobs[3].maximum = 10;
+    expect(!document.importProfile(inverted).applied, "a new inverted range is refused");
+    auto relative = inverted;
+    relative.knobs[3].type = knobTypeRelative;
+    expect(document.importProfile(relative).applied, "a relative knob may send a higher CCW value");
+
+    // A whole image: the CC / User profile comes in byte for byte, the DAW profile stays.
+    SettingsDocument fresh;
+    fresh.load(image);
+    auto file = image;
+    file[layout::profileSize + layout::slidersOffset + 2] = 21;
+    file[3] = 0x55;
+    const auto fromImage = fresh.importImage(file);
+    expect(fromImage.applied && fromImage.message.find("DAW profile was left out") != std::string::npos, "image imported");
+    expect(fresh.workingBytes()[layout::profileSize + layout::slidersOffset + 2] == 21, "image fader cc");
+    expect(fresh.workingBytes()[3] == image[3], "DAW profile unchanged");
+    SettingsWriter::validate(fresh.dirtySpans());
+    expect(!fresh.importImage(Bytes(100)).applied, "short image refused");
+    auto broken = file;
+    broken[layout::profileSize + 5] = 90;
+    expect(!fresh.importImage(broken).applied, "image with a bad message length refused");
+}
+
 void testJson()
 {
     auto exported = snapshotWith(knobAddress, knobRecord);
@@ -811,6 +989,9 @@ int main()
     testUndo();
     testDirtyTracking();
     testDescriptions();
+    testReader();
+    testSerialization();
+    testImport();
     testJson();
     testWriter();
     testMidiStream();

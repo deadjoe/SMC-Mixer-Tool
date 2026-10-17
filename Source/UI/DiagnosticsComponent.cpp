@@ -15,7 +15,7 @@ bool matches(const std::string& name, const char* part)
 juce::String portNamed(const char* part)
 {
     const auto named = [&](const MidiEndpointDescriptor& endpoint) {
-        return matches(endpoint.fullName(), "SMC-Mixer") && matches(endpoint.fullName(), part);
+        return midiname::isMixerName(endpoint.fullName()) && matches(endpoint.fullName(), part);
     };
     for (const auto& source : CoreMidiTransport::sources())
         if (named(source))

@@ -34,6 +34,13 @@ public:
     void revert(ControlSelection selection, DeviceProfile profile);
     void revertAll();
 
+    // Replaces the CC / User profile in one undoable step, as unsaved edits. Every field is
+    // checked first; nothing changes if one is out of range.
+    EditResult importProfile(const ControlProfile& profile);
+    // Takes the CC / User profile from a whole settings image, byte for byte. The DAW profile
+    // in the file is ignored, because it is read-only here.
+    EditResult importImage(const Bytes& image);
+
     bool canUndo() const noexcept { return !undoStack.empty(); }
     bool canRedo() const noexcept { return !redoStack.empty(); }
     bool undo();
@@ -69,6 +76,7 @@ private:
     static std::optional<RecordRange> recordRange(ControlSelection selection, DeviceProfile profile);
     static std::optional<std::size_t> fieldOffset(ControlKind kind, EditableField field);
     void remember();
+    EditResult replaceWorking(Bytes next, const std::string& extra);
 
     Bytes original;
     Bytes working;

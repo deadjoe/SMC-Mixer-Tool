@@ -155,6 +155,19 @@ std::vector<Bytes> VendorProtocol::vendorPayloads(const std::vector<Bytes>& mess
     return payloads;
 }
 
+std::vector<Bytes> VendorProtocol::fragments(const Bytes& payload, std::size_t maximumWrite)
+{
+    if (maximumWrite == 0 || payload.size() <= maximumWrite)
+        return { payload };
+    std::vector<Bytes> pieces;
+    for (std::size_t offset = 0; offset < payload.size(); offset += maximumWrite)
+    {
+        const auto end = std::min(payload.size(), offset + maximumWrite);
+        pieces.emplace_back(payload.begin() + static_cast<std::ptrdiff_t>(offset), payload.begin() + static_cast<std::ptrdiff_t>(end));
+    }
+    return pieces;
+}
+
 VersionInfo VendorProtocol::parseVersionResponse(const Bytes& message)
 {
     const auto payload = unwrapSysEx(message);

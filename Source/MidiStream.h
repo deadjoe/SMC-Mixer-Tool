@@ -71,6 +71,13 @@ inline bool containsIgnoringCase(const std::string& value, const std::string& pa
     return lower(value).find(lower(part)) != std::string::npos;
 }
 
+// The mixer names its USB-C ports, its Bluetooth MIDI port, and its Bluetooth peripheral
+// "SMC-Mixer". Every link matches that name the same way.
+inline bool isMixerName(const std::string& name)
+{
+    return containsIgnoringCase(name, "SMC-Mixer");
+}
+
 // Joins device, entity, and endpoint names. The mixer names its entity and endpoint alike
 // ("-Private"), so a part already shown is skipped, and a part that contains the name so
 // far replaces it.

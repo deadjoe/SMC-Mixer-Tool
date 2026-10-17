@@ -172,6 +172,99 @@ void SettingsDocument::revertAll()
     working = original;
 }
 
+namespace
+{
+// The first field in a profile that the mixer cannot hold, or that turns a valid range around.
+std::string importProblem(const ControlProfile& candidate, const ControlProfile& current)
+{
+    for (const auto& control : allControls())
+    {
+        for (const auto field : { EditableField::type, EditableField::mode, EditableField::channel, EditableField::cc,
+                                  EditableField::minimum, EditableField::maximum, EditableField::value1,
+                                  EditableField::value2, EditableField::led })
+        {
+            if (!hasField(control.kind, field))
+                continue;
+            const auto value = fieldValue(candidate, control, field);
+            if (!fieldLimits(control.kind, field).contains(value))
+            {
+                const auto shown = field == EditableField::channel ? value + 1 : value;
+                return controlDisplayName(control) + " has a value the mixer cannot store (" + std::to_string(shown) + ").";
+            }
+        }
+        if (isButton(control.kind) || isRelativeKnob(candidate, control))
+            continue;
+        const auto minimum = fieldValue(candidate, control, EditableField::minimum);
+        const auto maximum = fieldValue(candidate, control, EditableField::maximum);
+        const auto wasInverted = fieldValue(current, control, EditableField::minimum) == minimum
+                              && fieldValue(current, control, EditableField::maximum) == maximum;
+        if (minimum > maximum && !wasInverted)
+            return controlDisplayName(control) + " has Min above Max.";
+    }
+    for (const auto& button : candidate.buttons)
+        if (button.dawMessage.size() > layout::buttonMessageCapacity)
+            return "A Custom message is longer than " + std::to_string(layout::buttonMessageCapacity) + " bytes.";
+    return {};
+}
+
+int changedRecords(const SettingsDocument& document)
+{
+    return static_cast<int>(document.dirtySpans().size());
+}
+}
+
+EditResult SettingsDocument::replaceWorking(Bytes next, const std::string& extra)
+{
+    if (next == working)
+        return { false, "The file matches the settings on screen." };
+    remember();
+    lastEdit.reset();
+    working = std::move(next);
+    const auto changed = changedRecords(*this);
+    std::string message = changed == 0 ? std::string("Imported into CC / User. It now matches the mixer.")
+                                       : "Imported into CC / User. " + std::to_string(changed)
+                                             + (changed == 1 ? " record differs" : " records differ")
+                                             + " from the mixer; Write sends them.";
+    if (!extra.empty())
+        message += " " + extra;
+    return { true, message };
+}
+
+EditResult SettingsDocument::importProfile(const ControlProfile& profile)
+{
+    if (!loaded())
+        return { false, "Read the settings from the mixer before importing." };
+    const auto current = configuration().profile(DeviceProfile::ccUser);
+    if (const auto problem = importProblem(profile, current); !problem.empty())
+        return { false, "Nothing was imported. " + problem };
+    auto next = working;
+    ControlConfiguration::writeProfile(profile, DeviceProfile::ccUser, next);
+    return replaceWorking(std::move(next), {});
+}
+
+EditResult SettingsDocument::importImage(const Bytes& image)
+{
+    if (!loaded())
+        return { false, "Read the settings from the mixer before importing." };
+    if (image.size() != layout::snapshotSize)
+        return { false, "Nothing was imported. A settings image is " + std::to_string(layout::snapshotSize)
+                            + " bytes, and this file has " + std::to_string(image.size()) + "." };
+    try
+    {
+        ControlConfiguration::parse(image);
+    }
+    catch (const std::exception& error)
+    {
+        return { false, std::string("Nothing was imported. ") + error.what() + "." };
+    }
+
+    auto next = working;
+    const auto user = static_cast<std::ptrdiff_t>(layout::profileSize);
+    std::copy(image.begin() + user, image.end(), next.begin() + user);
+    const auto dawDiffers = !std::equal(image.begin(), image.begin() + user, original.begin());
+    return replaceWorking(std::move(next), dawDiffers ? "The file's DAW profile was left out; it is read-only." : "");
+}
+
 bool SettingsDocument::undo()
 {
     if (undoStack.empty())

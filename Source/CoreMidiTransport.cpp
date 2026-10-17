@@ -12,9 +12,43 @@ std::string MidiEndpointDescriptor::fullName() const
     return midiname::join({ deviceName, entityName, endpointName });
 }
 
+CoreMidiTransport::CoreMidiTransport()
+{
+    try
+    {
+        check(MIDIClientCreate(CFSTR("SMC Mixer Tool"), midiNotifyCallback, this, &client), "MIDIClientCreate");
+        check(MIDIInputPortCreate(client, CFSTR("SMC Response Input"), midiReadCallback, this, &inputPort),
+              "MIDIInputPortCreate");
+        check(MIDIOutputPortCreate(client, CFSTR("SMC Query Output"), &outputPort), "MIDIOutputPortCreate");
+    }
+    catch (const std::exception& error)
+    {
+        setupError = error.what();
+    }
+}
+
 CoreMidiTransport::~CoreMidiTransport()
 {
     close();
+    onSetupChanged = nullptr;
+    if (inputPort != MIDIPortRef {})
+        MIDIPortDispose(inputPort);
+    if (outputPort != MIDIPortRef {})
+        MIDIPortDispose(outputPort);
+    if (client != MIDIClientRef {})
+        MIDIClientDispose(client);
+}
+
+void CoreMidiTransport::midiNotifyCallback(const MIDINotification* message, void* context)
+{
+    if (message == nullptr || context == nullptr)
+        return;
+    // Adding or removing a device also sends object messages; the setup message covers them all.
+    if (message->messageID != kMIDIMsgSetupChanged)
+        return;
+    auto* transport = static_cast<CoreMidiTransport*>(context);
+    if (transport->onSetupChanged)
+        transport->onSetupChanged();
 }
 
 MidiEndpointDescriptor CoreMidiTransport::descriptor(MIDIEndpointRef endpoint)
@@ -76,7 +110,7 @@ bool CoreMidiTransport::findEndpoints(TransportKind transport,
     const auto* endpointKind = transport == TransportKind::usbC ? "Private" : "Bluetooth";
     const auto matches = [endpointKind](const MidiEndpointDescriptor& item) {
         const auto name = item.fullName();
-        return midiname::containsIgnoringCase(name, "SMC-Mixer") && midiname::containsIgnoringCase(name, endpointKind);
+        return midiname::isMixerName(name) && midiname::containsIgnoringCase(name, endpointKind);
     };
 
     const auto sourceList = sources();
@@ -199,6 +233,8 @@ void CoreMidiTransport::open(TransportKind transport)
     if (isOpen && openTransport == transport)
         return;
     close();
+    if (!setupError.empty())
+        throw std::runtime_error("CoreMIDI is unavailable: " + setupError);
 
     MidiEndpointDescriptor selectedSource;
     MidiEndpointDescriptor selectedDestination;
@@ -209,34 +245,22 @@ void CoreMidiTransport::open(TransportKind transport)
         throw std::runtime_error("SMC-Mixer Bluetooth MIDI port not found. Connect it in Audio MIDI Setup.");
     }
 
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        acceptingMidi = true;
+        assembler.reset();
+        completedResponse.reset();
+        capturedResponses.clear();
+        capturing = false;
+    }
+    check(MIDIPortConnectSource(inputPort, selectedSource.endpoint, nullptr), "MIDIPortConnectSource");
+
     openTransport = transport;
     source = selectedSource.endpoint;
     destination = selectedDestination.endpoint;
     selectedSourceName = selectedSource.fullName();
     selectedDestinationName = selectedDestination.fullName();
-
-    try
-    {
-        check(MIDIClientCreate(CFSTR("SMC Mixer Tool"), nullptr, nullptr, &client), "MIDIClientCreate");
-        check(MIDIInputPortCreate(client, CFSTR("SMC Response Input"), midiReadCallback, this, &inputPort),
-              "MIDIInputPortCreate");
-        check(MIDIOutputPortCreate(client, CFSTR("SMC Query Output"), &outputPort), "MIDIOutputPortCreate");
-        {
-            std::lock_guard<std::mutex> lock(mutex);
-            acceptingMidi = true;
-            assembler.reset();
-            completedResponse.reset();
-            capturedResponses.clear();
-            capturing = false;
-        }
-        check(MIDIPortConnectSource(inputPort, source, nullptr), "MIDIPortConnectSource");
-        isOpen = true;
-    }
-    catch (...)
-    {
-        close();
-        throw;
-    }
+    isOpen = true;
 }
 
 void CoreMidiTransport::send(const Bytes& message)
@@ -303,18 +327,10 @@ void CoreMidiTransport::close()
         acceptingMidi = false;
     }
 
+    // An endpoint that vanished with its device is already gone; disconnecting it is harmless.
     if (inputPort != MIDIPortRef {} && source != MIDIEndpointRef {})
         MIDIPortDisconnectSource(inputPort, source);
-    if (inputPort != MIDIPortRef {})
-        MIDIPortDispose(inputPort);
-    if (outputPort != MIDIPortRef {})
-        MIDIPortDispose(outputPort);
-    if (client != MIDIClientRef {})
-        MIDIClientDispose(client);
 
-    client = MIDIClientRef {};
-    inputPort = MIDIPortRef {};
-    outputPort = MIDIPortRef {};
     source = MIDIEndpointRef {};
     destination = MIDIEndpointRef {};
     isOpen = false;
