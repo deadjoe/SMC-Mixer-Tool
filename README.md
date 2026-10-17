@@ -6,7 +6,7 @@ macOS app for the M-VAVE SMC-Mixer ([Wireless DAW Control Surface](https://www.m
 
 ## Download
 
-[SMC Mixer Tool 1.0.0](https://github.com/deadjoe/SMC-Mixer-Tool/releases/tag/v1.0.0) is a universal macOS app for Apple silicon and Intel, on macOS 12 or later.
+[SMC Mixer Tool 1.0.1](https://github.com/deadjoe/SMC-Mixer-Tool/releases/tag/v1.0.1) is a universal macOS app for Apple silicon and Intel, on macOS 12 or later.
 
 The app is not notarized. The first time you open it, Control-click SMC Mixer Tool and choose Open.
 
@@ -20,13 +20,13 @@ In the CC / User view you can edit channel, CC, minimum, and maximum. Buttons al
 
 Export saves the profile you are viewing as JSON. Copy puts that JSON on the clipboard. Channels in the file are numbered from 1.
 
-The version next to the title is `1.0.0` plus the git commit used for the build. A dirty worktree adds `.dirty`.
+The version next to the title is `1.0.1` plus the git commit used for the build. A dirty worktree adds `.dirty`. The version itself is set once, in `project()` in CMakeLists.txt.
 
 The gear at the upper left opens diagnostics. It reports the USB-C Private and Master ports, the Bluetooth MIDI port, and which path carries settings. A Bluetooth connection also lists manufacturer, model, battery, signal, and services. Read snapshot loads the 6,282-byte image. Export .bin saves that image.
 
 ## Build
 
-macOS 12 or later, CMake 3.22, and the Xcode command-line tools. CMake fetches JUCE 9.0.4, which keeps its own license.
+macOS 12 or later, CMake 3.22, and the Xcode command-line tools. CMake fetches JUCE 9.0.4, which keeps its own license. Each build signs the app bundle ad hoc, so macOS keeps one Bluetooth permission for it.
 
 ```
 cmake -S . -B build

@@ -1,5 +1,5 @@
-if(NOT DEFINED SOURCE_DIR OR NOT DEFINED OUTPUT)
-    message(FATAL_ERROR "WriteBuildInfo.cmake requires SOURCE_DIR and OUTPUT")
+if(NOT DEFINED SOURCE_DIR OR NOT DEFINED OUTPUT OR NOT DEFINED VERSION)
+    message(FATAL_ERROR "WriteBuildInfo.cmake requires SOURCE_DIR, OUTPUT, and VERSION")
 endif()
 
 if(NOT GIT_EXECUTABLE)
@@ -33,7 +33,7 @@ if(GIT_EXECUTABLE)
     endif()
 endif()
 
-set(content "#pragma once\ninline constexpr const char* kSmcVersion = \"1.0.0+${hash}${dirty}\";\n")
+set(content "#pragma once\ninline constexpr const char* kSmcVersion = \"${VERSION}+${hash}${dirty}\";\n")
 if(EXISTS "${OUTPUT}")
     file(READ "${OUTPUT}" current)
     if(current STREQUAL content)

@@ -1,13 +1,14 @@
 cmake_minimum_required(VERSION 3.22)
 
 set(CMAKE_OSX_DEPLOYMENT_TARGET "12.0" CACHE STRING "Minimum macOS version" FORCE)
-project(SMCMixerToolGUI VERSION 1.0.0 LANGUAGES C CXX OBJCXX)
+project(SMCMixerToolGUI VERSION 1.0.1 LANGUAGES C CXX OBJCXX)
 
 find_package(Git QUIET)
 set(SMC_BUILD_INFO "${CMAKE_BINARY_DIR}/generated/BuildInfo.h")
 add_custom_target(SMCBuildInfo
     COMMAND ${CMAKE_COMMAND}
         -DSOURCE_DIR=${CMAKE_SOURCE_DIR}
+        -DVERSION=${PROJECT_VERSION}
         -DOUTPUT=${SMC_BUILD_INFO}
         -DGIT_EXECUTABLE=${GIT_EXECUTABLE}
         -P ${CMAKE_SOURCE_DIR}/cmake/WriteBuildInfo.cmake
@@ -17,6 +18,7 @@ add_custom_target(SMCBuildInfo
 execute_process(
     COMMAND ${CMAKE_COMMAND}
         -DSOURCE_DIR=${CMAKE_SOURCE_DIR}
+        -DVERSION=${PROJECT_VERSION}
         -DOUTPUT=${SMC_BUILD_INFO}
         -DGIT_EXECUTABLE=${GIT_EXECUTABLE}
         -P ${CMAKE_SOURCE_DIR}/cmake/WriteBuildInfo.cmake
@@ -103,6 +105,13 @@ target_link_libraries(SMCMixerGUI PRIVATE
 
 target_include_directories(SMCMixerGUI PRIVATE "${CMAKE_BINARY_DIR}/generated")
 add_dependencies(SMCMixerGUI SMCBuildInfo)
+
+# The linker only signs the executable. Sign the whole bundle so macOS ties the
+# Bluetooth permission to local.smc-mixer.gui instead of to a bare binary.
+add_custom_command(TARGET SMCMixerGUI POST_BUILD
+    COMMAND codesign --force --deep --sign - "$<TARGET_BUNDLE_DIR:SMCMixerGUI>"
+    VERBATIM
+)
 
 add_executable(SMCMixerCoreTests
     tests/core_tests.cpp
