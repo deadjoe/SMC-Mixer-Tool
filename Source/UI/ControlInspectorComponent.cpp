@@ -230,6 +230,7 @@ void ControlInspectorComponent::show(const View& view)
                      juce::dontSendNotification);
     else
         note.setText(mixerui::utf8(controlNote(*view.profile, *view.selection)), juce::dontSendNotification);
+    note.setTooltip(note.getText());
 
     choice.setVisible(ready);
     choiceCaption.setVisible(ready);
@@ -317,7 +318,7 @@ void ControlInspectorComponent::paint(juce::Graphics& graphics)
 void ControlInspectorComponent::resized()
 {
     auto area = getLocalBounds().withTrimmedBottom(6).reduced(36, 18);
-    auto top = area.removeFromTop(62);
+    auto top = area.removeFromTop(78);
 
     auto actions = top.removeFromRight(240);
     if (revert.isVisible())
@@ -335,7 +336,9 @@ void ControlInspectorComponent::resized()
         titleRow.removeFromLeft(10);
         readOnlyBadge.setBounds(titleRow.removeFromLeft(74).withSizeKeepingCentre(74, 18));
     }
-    note.setBounds(top.withHeight(juce::jmax(16, top.getHeight())));
+    // Two lines, so the longest note, a Custom key's 64-byte message, still fits; the
+    // tooltip holds the whole sentence if a narrow window cuts it short.
+    note.setBounds(top.withTrimmedTop(4));
 
     area.removeFromTop(12);
     const auto fields = area.withHeight(16 + 6 + MixerLookAndFeel::fieldHeight + 4 + 14);
