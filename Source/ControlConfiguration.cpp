@@ -26,10 +26,10 @@ const char* knobTypeName(std::uint8_t type)
 {
     switch (type)
     {
-        case 0: return "CC";
+        case 0: return "CC Abs";
         case 1: return "Aftertouch";
         case 2: return "Note";
-        case 3: return "CW";
+        case 3: return "CC Rel"; // Midi Suite calls this CW
         default: return nullptr;
     }
 }

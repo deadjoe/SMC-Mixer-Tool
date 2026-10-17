@@ -183,9 +183,9 @@ int main()
     expect(error == "This field cannot be edited.", "index message");
     SettingsDocument relative;
     relative.load(image);
-    expect(relative.apply({ ControlKind::knob, 0 }, DeviceProfile::ccUser, EditableField::type, knobTypeCw, error), "cw type");
-    expect(relative.apply({ ControlKind::knob, 0 }, DeviceProfile::ccUser, EditableField::minimum, 65, error), "cw ccw value");
-    expect(relative.apply({ ControlKind::knob, 0 }, DeviceProfile::ccUser, EditableField::maximum, 1, error), "cw value below ccw");
+    expect(relative.apply({ ControlKind::knob, 0 }, DeviceProfile::ccUser, EditableField::type, knobTypeRelative, error), "relative type");
+    expect(relative.apply({ ControlKind::knob, 0 }, DeviceProfile::ccUser, EditableField::minimum, 65, error), "relative ccw value");
+    expect(relative.apply({ ControlKind::knob, 0 }, DeviceProfile::ccUser, EditableField::maximum, 1, error), "relative cw value below ccw");
     expect(relative.apply({ ControlKind::knob, 0 }, DeviceProfile::ccUser, EditableField::type, 0, error), "back to cc");
     expect(!relative.apply({ ControlKind::knob, 0 }, DeviceProfile::ccUser, EditableField::minimum, 66, error), "cc range checked again");
 
@@ -238,7 +238,7 @@ int main()
     }
     expect(sawButton, "button record address and cc");
     expect(!records.apply({ ControlKind::slider, 0 }, DeviceProfile::daw, EditableField::minimum, 1, error), "daw slider locked");
-    expect(std::string(knobTypeName(0)) == "CC" && std::string(knobTypeName(3)) == "CW", "knob type names");
+    expect(std::string(knobTypeName(0)) == "CC Abs" && std::string(knobTypeName(3)) == "CC Rel", "knob type names");
     expect(knobTypeName(4) == nullptr, "unknown knob type");
     expect(std::string(sliderTypeName(1)) == "Aftertouch" && std::string(sliderTypeName(2)) == "DAW", "slider type names");
     expect(std::string(buttonModeName(0)) == "CC Single" && std::string(buttonModeName(2)) == "CC Push", "button mode names");

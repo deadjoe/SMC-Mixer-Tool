@@ -145,10 +145,10 @@ bool SettingsDocument::apply(ControlSelection selection,
         return false;
     }
 
-    // A CW knob sends Min on each counter-clockwise step and Max on each clockwise step,
+    // A relative knob sends Min on each counter-clockwise step and Max on each clockwise step,
     // so the pair is two values, not a range. Mackie's 65 and 1 must stay possible.
     const auto relativeKnob = selection.kind == ControlKind::knob
-        && working[range->offset] == knobTypeCw;
+        && working[range->offset] == knobTypeRelative;
     if ((field == EditableField::minimum || field == EditableField::maximum) && !relativeKnob)
     {
         const auto minimumOffset = fieldOffset(selection.kind, EditableField::minimum);

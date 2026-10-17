@@ -65,7 +65,8 @@ FieldMeaning knobMeaning(std::uint8_t type)
         case 3:
             meaning.minimumName = "CCW VALUE";
             meaning.maximumName = "CW VALUE";
-            meaning.note = "Relative: each step sends the CC with the CW value or the CCW value. Mackie uses 1 and 65.";
+            meaning.note = "Each step sends the CC with the CW or CCW value. Use 1 and 127 for two's complement, "
+                           "or 65 and 63 for binary offset.";
             break;
         default:
             break;
@@ -702,7 +703,7 @@ void ControlInspectorComponent::refreshFields()
             const auto meaning = knobMeaning(knob.type);
             ccIsController = meaning.ccIsController;
             if (showEditors)
-                setChoice(0, "TYPE", EditableField::type, knob.type, knobTypes, "CC, Aftertouch, Note, or CW.");
+                setChoice(0, "TYPE", EditableField::type, knob.type, knobTypes, "CC Abs, Aftertouch, Note, or CC Rel. Midi Suite calls these CC and CW.");
             else
                 setField(0, "TYPE", namedValue(knobTypeName(knob.type), knob.type));
             setField(1, "SPEED", knob.speed == 2 ? juce::String("Normal") : number(knob.speed));
