@@ -39,5 +39,8 @@ jobs:
           path: ui-renders
           if-no-files-found: ignore
 
-      - name: Build the app
-        run: cmake --build build --target SMCMixerGUI -j 4
+      - name: Build the app and the probe
+        run: cmake --build build --target SMCMixerGUI SMCMixerProbe -j 4
+
+      - name: Check MIDI setup notifications
+        run: ./build/SMCMixerProbe notify
