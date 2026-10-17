@@ -22,6 +22,7 @@ public:
     std::function<void()> onRedo;
     std::function<void()> onExport;
     std::function<void()> onCopy;
+    std::function<void()> onImport;
 
     struct Actions
     {
@@ -31,6 +32,7 @@ public:
         bool canUndo = false;
         bool canRedo = false;
         bool canExport = false;
+        bool canImport = false;
         bool canSwitchProfile = false;
     };
 
@@ -51,6 +53,7 @@ private:
     juce::TextButton ccUserButton { "CC / User" };
     juce::TextButton dawButton { "DAW" };
     juce::Label profileHint;
+    juce::TextButton importButton { juce::String::fromUTF8("Import\xe2\x80\xa6") };
     juce::TextButton exportButton { juce::String::fromUTF8("Export\xe2\x80\xa6") };
     juce::TextButton copyButton { "Copy JSON" };
     IconButton undoButton { "Undo", mixerui::Icon::undo, true };

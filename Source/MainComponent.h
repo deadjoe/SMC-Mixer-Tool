@@ -20,6 +20,8 @@ class MainComponent final : public juce::Component,
 public:
     struct Options
     {
+        // The link to the mixer. Empty means the real one, DeviceController.
+        std::unique_ptr<DeviceLink> link;
         bool connectOnStart = true;
     };
 
@@ -43,6 +45,7 @@ public:
         toggleDiagnosticsCommand,
         useUsbCommand,
         useBluetoothCommand,
+        importCommand,
         aboutCommand
     };
 
@@ -66,7 +69,11 @@ public:
 
     // Handles one worker event. The timer delivers them; tests may too.
     void deliver(DeviceEvent event);
+    // Takes the link's events and connection changes. The timer calls it; tests may too.
+    void pollLink();
     void selectControl(ControlSelection control);
+    // Imports a profile JSON file or a settings image into CC / User as unsaved edits.
+    void importFile(const juce::File& file);
 
     juce::ApplicationCommandManager& commands() noexcept { return commandManager; }
     juce::MenuBarModel& menuModel() noexcept { return menu; }
@@ -107,7 +114,10 @@ private:
 
     void timerCallback() override;
     void refresh();
-    void refreshNow();
+    // keepDocument reconnects without reading the settings, so unsaved edits survive a replug.
+    void refreshNow(bool keepDocument = false);
+    void handleConnectionChange();
+    void chooseImportFile();
     void readSettings();
     void readSettingsNow();
     void write();
@@ -153,5 +163,6 @@ private:
     std::optional<DeviceSnapshot> snapshot;
     juce::String settingsProblem;
     SettingsDocument settings;
-    DeviceController controller;
+    bool settingsFollow = false;
+    std::unique_ptr<DeviceLink> link;
 };

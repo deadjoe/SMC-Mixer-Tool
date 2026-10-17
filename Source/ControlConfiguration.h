@@ -116,6 +116,9 @@ struct ControlConfiguration
     std::array<ControlProfile, layout::profileCount> profiles;
 
     static ControlConfiguration parse(const Bytes& data);
+    // The inverse of parse() for one profile. Bytes the records do not describe, such as
+    // the unused tail of a button's message area, keep their value in the image.
+    static void writeProfile(const ControlProfile& profile, DeviceProfile which, Bytes& image);
     const ControlProfile& profile(DeviceProfile profile) const;
     std::string toJson(DeviceProfile profile) const;
 };

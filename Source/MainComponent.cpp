@@ -1,6 +1,7 @@
 #include "MainComponent.h"
 
 #include "BuildInfo.h"
+#include "ProfileJson.h"
 
 namespace
 {
@@ -13,6 +14,7 @@ juce::String records(int count)
 }
 
 MainComponent::MainComponent(Options options)
+    : link(options.link != nullptr ? std::move(options.link) : std::make_unique<DeviceController>())
 {
     juce::LookAndFeel::setDefaultLookAndFeel(&lookAndFeel);
     setLookAndFeel(&lookAndFeel);
@@ -43,6 +45,7 @@ MainComponent::MainComponent(Options options)
     overviewView.onRedo = [this] { redo(); };
     overviewView.onExport = [this] { exportProfile(); };
     overviewView.onCopy = [this] { copyProfile(); };
+    overviewView.onImport = [this] { chooseImportFile(); };
     overviewView.diagram().onControlSelected = [this](ControlSelection control) { selectControl(control); };
     auto& inspector = overviewView.inspector();
     inspector.onControlEdited = [this](ControlSelection control, DeviceProfile profile, EditableField field,
@@ -73,7 +76,7 @@ MainComponent::~MainComponent()
 {
     stopTimer();
     removeKeyListener(commandManager.getKeyMappings());
-    controller.shutdown();
+    link->shutdown();
     setLookAndFeel(nullptr);
     juce::LookAndFeel::setDefaultLookAndFeel(nullptr);
 }
@@ -198,13 +201,16 @@ void MainComponent::publish()
 
     const auto changed = static_cast<int>(settings.dirtySpans().size());
     const auto idle = activity == Activity::idle;
-    overviewView.setActions({ changed,
-                              idle && changed > 0,
-                              idle && changed > 0,
-                              idle && settings.canUndo(),
-                              idle && settings.canRedo(),
-                              profile != nullptr,
-                              profile != nullptr });
+    DeviceOverviewComponent::Actions actions;
+    actions.changedRecords = changed;
+    actions.canWrite = idle && changed > 0;
+    actions.canRevertAll = idle && changed > 0;
+    actions.canUndo = idle && settings.canUndo();
+    actions.canRedo = idle && settings.canRedo();
+    actions.canExport = profile != nullptr;
+    actions.canImport = idle && settings.loaded();
+    actions.canSwitchProfile = profile != nullptr;
+    overviewView.setActions(actions);
     overviewView.setProfileKind(viewProfile);
     commandManager.commandStatusChanged();
 }
@@ -250,13 +256,17 @@ void MainComponent::refresh()
     });
 }
 
-void MainComponent::refreshNow()
+void MainComponent::refreshNow(bool keepDocument)
 {
-    if (!controller.requestRefresh(transport, true))
+    if (!link->requestRefresh(transport, !keepDocument))
         return;
-    settings.clear();
+    settingsFollow = !keepDocument;
+    if (!keepDocument)
+    {
+        settings.clear();
+        settingsProblem.clear();
+    }
     snapshot.reset();
-    settingsProblem.clear();
     diagnosticsView.clearSnapshot();
     diagnosticsView.refreshEndpoints();
     headerBar.setDevice("SMC-Mixer", {});
@@ -266,6 +276,44 @@ void MainComponent::refreshNow()
                           {} });
     setActivity(Activity::refreshing);
     publish();
+}
+
+void MainComponent::handleConnectionChange()
+{
+    diagnosticsView.refreshEndpoints();
+    if (transport == TransportKind::usbC)
+    {
+        const auto present = link->isUsbPresent();
+        if (!present && snapshot)
+        {
+            // Unplugged. A request in flight fails on its own; the edits on screen stay.
+            snapshot.reset();
+            headerBar.setDevice("SMC-Mixer", {});
+            if (activity == Activity::idle)
+                headerBar.setStatus({ mixerui::Tone::error, "Unplugged",
+                                      settings.isDirty() ? "Unsaved edits are kept. Plug the mixer back in to write them."
+                                                         : juce::String("Plug the mixer back in to reconnect."),
+                                      {} });
+            publish();
+        }
+        else if (present && !snapshot && activity == Activity::idle)
+        {
+            // Plugged back in. With unsaved edits only the identity is read, so they stay.
+            refreshNow(settings.isDirty());
+        }
+        return;
+    }
+
+    if (!link->isBluetoothConnected() && snapshot && activity == Activity::idle)
+    {
+        snapshot.reset();
+        headerBar.setDevice("SMC-Mixer", {});
+        headerBar.setStatus({ mixerui::Tone::error, "Disconnected",
+                              "The Bluetooth link dropped. Refresh to connect again"
+                                  + juce::String(settings.isDirty() ? "; unsaved edits are kept." : "."),
+                              {} });
+        publish();
+    }
 }
 
 void MainComponent::readSettings()
@@ -280,7 +328,7 @@ void MainComponent::readSettings()
 
 void MainComponent::readSettingsNow()
 {
-    if (!controller.requestSettings(transport))
+    if (!link->requestSettings(transport))
         return;
     // The settings on screen stay, read-only, until the new image arrives.
     settingsProblem.clear();
@@ -305,7 +353,7 @@ void MainComponent::startWrite()
 {
     if (activity != Activity::idle || !settings.isDirty())
         return;
-    if (!controller.requestWrite(transport, settings.dirtySpans()))
+    if (!link->requestWrite(transport, settings.dirtySpans()))
         return;
     headerBar.setStatus({ mixerui::Tone::busy, "Writing", "Writing, checking, and saving the changed records" + ellipsis, {} });
     setActivity(Activity::writing);
@@ -444,8 +492,71 @@ void MainComponent::showAbout()
 
 void MainComponent::timerCallback()
 {
-    for (auto& event : controller.pollEvents())
+    pollLink();
+}
+
+void MainComponent::pollLink()
+{
+    for (auto& event : link->pollEvents())
         deliver(std::move(event));
+    if (link->takeConnectionChange())
+        handleConnectionChange();
+}
+
+void MainComponent::chooseImportFile()
+{
+    if (activity != Activity::idle || !settings.loaded())
+        return;
+    fileChooser = std::make_unique<juce::FileChooser>(
+        "Import into the CC / User profile", juce::File::getSpecialLocation(juce::File::userDocumentsDirectory),
+        "*.json;*.bin");
+    fileChooser->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
+                             [safe = juce::Component::SafePointer<MainComponent>(this)](const juce::FileChooser& chooser) {
+                                 if (safe == nullptr)
+                                     return;
+                                 const auto file = chooser.getResult();
+                                 safe->fileChooser.reset();
+                                 if (file != juce::File())
+                                     safe->importFile(file);
+                             });
+}
+
+void MainComponent::importFile(const juce::File& file)
+{
+    if (activity != Activity::idle || !settings.loaded())
+    {
+        notify("Read the settings from the mixer before importing.", mixerui::Tone::warning);
+        return;
+    }
+
+    EditResult result;
+    if (file.hasFileExtension("bin"))
+    {
+        juce::MemoryBlock data;
+        if (!file.loadFileAsData(data))
+        {
+            notify("Could not read " + file.getFileName() + ".", mixerui::Tone::error);
+            return;
+        }
+        const auto* bytes = static_cast<const std::uint8_t*>(data.getData());
+        result = settings.importImage(Bytes(bytes, bytes + data.getSize()));
+    }
+    else
+    {
+        auto profile = settings.configuration().profile(DeviceProfile::ccUser);
+        const auto parsed = profilejson::read(file.loadFileAsString(), profile);
+        if (parsed.failed())
+        {
+            notify("Nothing was imported. " + parsed.getErrorMessage(), mixerui::Tone::error);
+            return;
+        }
+        result = settings.importProfile(profile);
+    }
+
+    if (result.applied)
+        viewProfile = DeviceProfile::ccUser;
+    notify(mixerui::utf8(result.message), result.applied ? mixerui::Tone::success : mixerui::Tone::warning);
+    publish();
 }
 
 void MainComponent::deliver(DeviceEvent event)
@@ -457,7 +568,7 @@ void MainComponent::deliver(DeviceEvent event)
             snapshot = event.snapshot;
             diagnosticsView.setSnapshot(event.snapshot);
             headerBar.setDevice(mixerui::utf8(event.snapshot.version.deviceName), mixerui::utf8(event.snapshot.version.versionLabel));
-            if (activity == Activity::refreshing)
+            if (activity == Activity::refreshing && settingsFollow)
             {
                 // The same request reads the settings next.
                 setActivity(Activity::readingSettings);
@@ -564,7 +675,7 @@ void MainComponent::getAllCommands(juce::Array<juce::CommandID>& ids)
     ids.addArray({ refreshCommand, readSettingsCommand, writeCommand, exportProfileCommand, copyProfileCommand,
                    exportImageCommand, undoCommand, redoCommand, revertControlCommand, revertAllCommand,
                    showCcUserCommand, showDawCommand, toggleDiagnosticsCommand, useUsbCommand, useBluetoothCommand,
-                   aboutCommand });
+                   importCommand, aboutCommand });
 }
 
 void MainComponent::getCommandInfo(juce::CommandID id, juce::ApplicationCommandInfo& info)
@@ -610,6 +721,11 @@ void MainComponent::getCommandInfo(juce::CommandID id, juce::ApplicationCommandI
             info.setInfo("Copy Profile as JSON", "Copy the profile on screen as JSON", "File", 0);
             info.addDefaultKeypress('c', command | shift);
             info.setActive(loaded);
+            break;
+        case importCommand:
+            info.setInfo("Import" + ellipsis, "Import a profile JSON file or a settings image into CC / User", "File", 0);
+            info.addDefaultKeypress('o', command);
+            info.setActive(idle && settings.loaded());
             break;
         case exportImageCommand:
             info.setInfo("Export Settings Image" + ellipsis, "Save the 6,282-byte settings image", "File", 0);
@@ -671,6 +787,7 @@ bool MainComponent::perform(const InvocationInfo& info)
         case exportProfileCommand: exportProfile(); return true;
         case copyProfileCommand: copyProfile(); return true;
         case exportImageCommand: diagnosticsView.exportSettings(); return true;
+        case importCommand: chooseImportFile(); return true;
         case undoCommand: undo(); return true;
         case redoCommand: redo(); return true;
         case revertControlCommand: revertControl(); return true;
@@ -695,6 +812,8 @@ juce::PopupMenu MainComponent::Menu::getMenuForIndex(int index, const juce::Stri
     switch (index)
     {
         case 0:
+            popup.addCommandItem(&manager, importCommand);
+            popup.addSeparator();
             popup.addCommandItem(&manager, exportProfileCommand);
             popup.addCommandItem(&manager, copyProfileCommand);
             popup.addSeparator();

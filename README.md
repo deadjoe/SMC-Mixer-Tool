@@ -14,6 +14,8 @@ The app is not notarized. The first time you open it, Control-click SMC Mixer To
 
 Connect the mixer with USB-C or Bluetooth and open the app. It finds the mixer on the link chosen at the top right, reads its identity, then reads a 6,282-byte settings image: the DAW profile, then the CC / User profile, 3,141 bytes each. The bar across the top says whether the mixer is online, what the app is doing, and what the link reports: the USB-C port, or battery and signal over Bluetooth. Refresh reads everything again.
 
+Unplugging the USB-C cable shows at once, and plugging it back in reconnects. With unsaved edits only the identity is read again, so the edits stay and Write can send them. A dropped Bluetooth link is reported too; Refresh connects again. Over Bluetooth the app keeps one connection for all its requests, and splits a write that is longer than the link allows.
+
 The panel draws the mixer as it is laid out: eight channels of a knob over a fader and its Mute, Solo, Record, and Select keys, then the transport keys. Each control shows what is stored for it. A knob shows its CC number, its type, and its Min to Max range on the ring. A fader shows its range on the slot, and each key shows the CC, note, or program it sends. Click a control, or move between them with the arrow keys, to see all of its settings below. The panel only selects a control. It does not send performance MIDI.
 
 CC / User and DAW, at the top left of the panel, choose which stored profile is on screen. The mixer's live mode stays where it is. The M-VAVE manual switches it by holding Shift and pressing Left or Right.
@@ -24,7 +26,7 @@ A dot marks each control with an unsaved edit. Undo and Redo step through edits,
 
 The mixer sends each control message on its USB-C Master port, its Private port, and over Bluetooth at the same time. In a host or instrument, turn on only one of these inputs, or every message arrives two or three times.
 
-Export saves the profile on screen as JSON. Copy JSON puts that JSON on the clipboard. Channels in the file are numbered from 1.
+Export saves the profile on screen as JSON. Copy JSON puts that JSON on the clipboard. Channels in the file are numbered from 1. Import reads such a file, or a settings image saved from diagnostics, into the CC / User profile as unsaved edits, so you can look them over before Write. A JSON file only has to list the controls it changes. Every value is checked first, and nothing is imported if one is out of range. A settings image brings in the whole CC / User profile, including Custom messages; its DAW profile is left out.
 
 | Shortcut | Action |
 | --- | --- |
@@ -34,6 +36,7 @@ Export saves the profile on screen as JSON. Copy JSON puts that JSON on the clip
 | Cmd+Z, Shift+Cmd+Z | Undo, Redo |
 | Cmd+Delete | Revert the selected control |
 | Cmd+1, Cmd+2 | Show CC / User, show DAW |
+| Cmd+O | Import a profile or settings image |
 | Cmd+E | Export the profile as JSON |
 | Shift+Cmd+C | Copy the profile as JSON |
 | Shift+Cmd+D | Diagnostics |
@@ -98,7 +101,9 @@ cmake -S . -B build-release -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES
 cmake --build build-release --target SMCMixerGUI
 ```
 
-The core tests cover the vendor frames, acknowledgements, the snapshot layout, field limits and ranges, undo, the control descriptions, SysEx assembly, and the write sequence against a simulated mixer. They build with warnings as errors. The UI tests build the app's components without a window and never open a MIDI port or Bluetooth: they check the layout from the smallest window size up, the selection ring, the Min and Max editors, the status bar, the quit prompt, the commands, and text contrast. `SMCMixerUITests --render <folder>` also saves a PNG of each state. GitHub Actions runs both and builds the app on macOS for every pull request and every push to main.
+The core tests cover the vendor frames, acknowledgements, Bluetooth write splitting, the snapshot layout, field limits and ranges, undo, import, the control descriptions, SysEx assembly, and the read and write sequences against a simulated mixer, including dropped and corrupt replies. They build with warnings as errors. The UI tests build the app's components without a window and never open a MIDI port or Bluetooth: they check the layout from the smallest window size up, the selection ring, the Min and Max editors, the status bar, unplugging and replugging, import, the write and quit prompts, the commands, and text contrast. `SMCMixerUITests --render <folder>` also saves a PNG of each state. GitHub Actions runs both and builds the app on macOS for every pull request and every push to main.
+
+`SMCMixerProbe usb` or `SMCMixerProbe bluetooth` reads the identity and the settings image from a connected mixer a few times and reports the timing; it never writes. `SMCMixerProbe notify` checks that MIDI setup changes reach the app's transport.
 
 ## License
 

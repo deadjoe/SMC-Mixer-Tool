@@ -62,6 +62,7 @@ set(SMC_APP_SOURCES
     Source/MainComponent.h
     Source/MainComponent.cpp
     Source/DeviceModel.h
+    Source/DeviceLink.h
     Source/DeviceController.h
     Source/DeviceController.cpp
     Source/SettingsLayout.h
@@ -71,6 +72,8 @@ set(SMC_APP_SOURCES
     Source/SettingsProtocol.cpp
     Source/SettingsWriter.h
     Source/SettingsWriter.cpp
+    Source/SettingsReader.h
+    Source/SettingsReader.cpp
     Source/CoreMidiTransport.h
     Source/CoreMidiTransport.cpp
     Source/BleTransport.h
@@ -81,6 +84,8 @@ set(SMC_APP_SOURCES
     Source/ControlDescription.cpp
     Source/SettingsDocument.h
     Source/SettingsDocument.cpp
+    Source/ProfileJson.h
+    Source/ProfileJson.cpp
     Source/UI/MixerLookAndFeel.h
     Source/UI/MixerLookAndFeel.cpp
     Source/UI/Widgets.h
@@ -139,6 +144,7 @@ add_executable(SMCMixerCoreTests
     Source/VendorProtocol.cpp
     Source/SettingsProtocol.cpp
     Source/SettingsWriter.cpp
+    Source/SettingsReader.cpp
     Source/ControlConfiguration.cpp
     Source/ControlDescription.cpp
     Source/SettingsDocument.cpp
@@ -161,3 +167,17 @@ target_link_libraries(SMCMixerUITests PRIVATE
     ${SMC_PLATFORM_LIBRARIES}
 )
 add_dependencies(SMCMixerUITests SMCBuildInfo)
+
+# A read-only command-line probe for checking the USB-C and Bluetooth transports on hardware.
+add_executable(SMCMixerProbe
+    tools/smc_probe.cpp
+    Source/BleTransport.mm
+    Source/CoreMidiTransport.cpp
+    Source/SettingsProtocol.cpp
+    Source/SettingsReader.cpp
+    Source/VendorProtocol.cpp
+)
+target_include_directories(SMCMixerProbe PRIVATE Source)
+target_compile_features(SMCMixerProbe PRIVATE cxx_std_17)
+target_compile_options(SMCMixerProbe PRIVATE -Wall -Wextra -Wpedantic -Werror)
+target_link_libraries(SMCMixerProbe PRIVATE ${SMC_PLATFORM_LIBRARIES})

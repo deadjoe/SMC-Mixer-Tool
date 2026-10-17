@@ -3,146 +3,352 @@
 
 #include "BleTransport.h"
 
+#include "MidiStream.h"
+#include "VendorProtocol.h"
+
 #include <chrono>
 #include <condition_variable>
+#include <memory>
 #include <mutex>
 #include <stdexcept>
+#include <string>
 
 namespace
 {
-struct OperationState
-{
-    std::mutex mutex;
-    std::condition_variable condition;
-    bool finished = false;
-    std::string failure;
-    Bytes response;
-    BleHealthInfo health;
-};
+NSString* const vendorService = @"AE40";
+NSString* const vendorWrite = @"AE41";
+NSString* const vendorNotify = @"AE42";
+NSString* const midiService = @"03B80E5A-EDE8-4B33-A751-6CE34EC4C700";
+NSString* const manufacturerName = @"2A29";
+NSString* const modelNumber = @"2A24";
+NSString* const batteryLevel = @"2A19";
 
 std::string toStdString(NSString* value)
 {
-    NSData* data = value == nil ? nil : [value dataUsingEncoding:NSUTF8StringEncoding];
-    if (data == nil || data.length == 0)
-        return {};
-    const auto* bytes = static_cast<const char*>(data.bytes);
-    return std::string(bytes, data.length);
+    return value == nil ? std::string() : std::string(value.UTF8String != nullptr ? value.UTF8String : "");
 }
 
-NSString* readableValue(NSData* data)
+bool isMixer(CBPeripheral* peripheral)
 {
-    return data == nil ? nil : [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    return peripheral.name != nil && midiname::isMixerName(toStdString(peripheral.name));
 }
 
 CBUUID* uuid(NSString* value)
 {
     return [CBUUID UUIDWithString:value];
 }
+
+enum class Pending
+{
+    none,
+    query,
+    health
+};
 }
 
-@interface SMCBleOperation : NSObject <CBCentralManagerDelegate, CBPeripheralDelegate>
-- (instancetype)initWithState:(OperationState*)state
-                        query:(const Bytes*)query
-                    healthMode:(BOOL)healthMode
-                         queue:(dispatch_queue_t)queue;
-- (void)start;
+typedef void (^SMCQueryDone)(const Bytes& reply, NSString* error);
+typedef void (^SMCHealthDone)(const BleHealthInfo& health, NSString* error);
+
+// Lives on one serial queue. Every method and delegate callback runs there.
+@interface SMCBleSession : NSObject <CBCentralManagerDelegate, CBPeripheralDelegate>
+- (instancetype)initWithQueue:(dispatch_queue_t)queue;
+- (void)startQuery:(NSData*)payload done:(SMCQueryDone)done;
+- (void)startHealth:(SMCHealthDone)done;
+- (void)cancelPending;
 - (void)shutdown;
+@property (atomic, readonly) BOOL ready;
+@property (atomic, copy) void (^onDisconnected)(void);
 @end
 
-@implementation SMCBleOperation
+@interface SMCBleSession ()
+@property (atomic, readwrite) BOOL ready;
+@end
+
+@implementation SMCBleSession
 {
-    OperationState* operationState;
-    NSData* vendorQuery;
-    BOOL healthMode;
     dispatch_queue_t delegateQueue;
     CBCentralManager* central;
     CBPeripheral* peripheral;
-    int serviceCount;
-    int describedServices;
+    CBCharacteristic* writeCharacteristic;
+    CBCharacteristic* notifyCharacteristic;
+    BOOL scanning;
+    BOOL discovering;
+    BOOL servicesReady;
+    BOOL subscribing;
+    BOOL notifying;
+    int servicesToDescribe;
+
+    Pending pending;
+    NSData* payload;
+    SMCQueryDone queryDone;
+    SMCHealthDone healthDone;
+    BOOL collecting;
+    Bytes reply;
+    NSMutableArray<NSData*>* writes;
+
+    BleHealthInfo health;
     int pendingReads;
-    bool rssiCompleted;
+    BOOL rssiRead;
+    BOOL healthReading;
 }
 
-- (instancetype)initWithState:(OperationState*)state
-                        query:(const Bytes*)query
-                    healthMode:(BOOL)wantsHealth
-                         queue:(dispatch_queue_t)queue
+- (instancetype)initWithQueue:(dispatch_queue_t)queue
 {
     self = [super init];
     if (self != nil)
     {
-        operationState = state;
-        healthMode = wantsHealth;
         delegateQueue = queue;
-        serviceCount = 0;
-        describedServices = 0;
-        pendingReads = 0;
-        rssiCompleted = false;
-        if (query != nullptr)
-            vendorQuery = [NSData dataWithBytes:query->data() length:query->size()];
+        writes = [NSMutableArray array];
+        pending = Pending::none;
     }
     return self;
 }
 
-- (void)start
+- (void)startQuery:(NSData*)data done:(SMCQueryDone)done
 {
-    central = [[CBCentralManager alloc] initWithDelegate:self queue:delegateQueue options:nil];
+    [self cancelPending];
+    pending = Pending::query;
+    payload = data;
+    queryDone = done;
+    [self advance];
+}
+
+- (void)startHealth:(SMCHealthDone)done
+{
+    [self cancelPending];
+    pending = Pending::health;
+    healthDone = done;
+    health = {};
+    healthReading = NO;
+    [self advance];
+}
+
+- (void)cancelPending
+{
+    pending = Pending::none;
+    queryDone = nil;
+    healthDone = nil;
+    payload = nil;
+    collecting = NO;
+    healthReading = NO;
+    [writes removeAllObjects];
+    if (scanning)
+    {
+        [central stopScan];
+        scanning = NO;
+    }
+    // A connection still being made is abandoned, so it does not complete behind a later request.
+    if (peripheral != nil && peripheral.state == CBPeripheralStateConnecting)
+        [central cancelPeripheralConnection:peripheral];
 }
 
 - (void)shutdown
 {
-    dispatch_sync(delegateQueue, ^{
-        central.delegate = nil;
-        [central stopScan];
+    [self cancelPending];
+    if (peripheral != nil)
+    {
         peripheral.delegate = nil;
-        if (peripheral != nil)
-            [central cancelPeripheralConnection:peripheral];
-        peripheral = nil;
-        central = nil;
-    });
+        [central cancelPeripheralConnection:peripheral];
+    }
+    central.delegate = nil;
+    [self forgetConnection];
+    peripheral = nil;
+    central = nil;
 }
 
-- (void)finishWithError:(NSString*)message
+- (void)forgetConnection
 {
-    std::lock_guard<std::mutex> lock(operationState->mutex);
-    if (operationState->finished)
+    writeCharacteristic = nil;
+    notifyCharacteristic = nil;
+    discovering = NO;
+    servicesReady = NO;
+    subscribing = NO;
+    notifying = NO;
+    servicesToDescribe = 0;
+    self.ready = NO;
+}
+
+- (void)fail:(NSString*)message
+{
+    const auto kind = pending;
+    auto query = queryDone;
+    auto healthBlock = healthDone;
+    [self cancelPending];
+    if (kind == Pending::query && query != nil)
+        query({}, message);
+    else if (kind == Pending::health && healthBlock != nil)
+        healthBlock({}, message);
+}
+
+// Moves the pending request one step: Bluetooth on, mixer found, connected, services and
+// characteristics discovered, AE42 subscribed, then the request itself.
+- (void)advance
+{
+    if (pending == Pending::none)
         return;
-    if (message != nil)
-        operationState->failure = toStdString(message);
-    operationState->finished = true;
-    operationState->condition.notify_all();
+
+    if (central == nil)
+    {
+        central = [[CBCentralManager alloc] initWithDelegate:self queue:delegateQueue options:nil];
+        return;
+    }
+    if (central.state != CBManagerStatePoweredOn)
+    {
+        if (central.state != CBManagerStateUnknown && central.state != CBManagerStateResetting)
+            [self fail:[NSString stringWithFormat:@"Bluetooth is unavailable (state %ld, authorization %ld). "
+                                                  @"Check that Bluetooth is on and the app may use it.",
+                                                  (long)central.state, (long)CBManager.authorization]];
+        return;
+    }
+
+    if (peripheral == nil)
+    {
+        NSArray<CBPeripheral*>* connected = [central retrieveConnectedPeripheralsWithServices:@[ uuid(midiService), uuid(vendorService), uuid(@"AE00") ]];
+        for (CBPeripheral* candidate in connected)
+        {
+            if (isMixer(candidate))
+            {
+                [self usePeripheral:candidate];
+                break;
+            }
+        }
+        if (peripheral == nil)
+        {
+            if (!scanning)
+            {
+                scanning = YES;
+                [central scanForPeripheralsWithServices:nil options:nil];
+            }
+            return;
+        }
+    }
+
+    switch (peripheral.state)
+    {
+        case CBPeripheralStateDisconnected:
+            [central connectPeripheral:peripheral options:nil];
+            return;
+        case CBPeripheralStateConnecting:
+        case CBPeripheralStateDisconnecting:
+            return;
+        case CBPeripheralStateConnected:
+            break;
+    }
+
+    if (!servicesReady)
+    {
+        if (!discovering)
+        {
+            discovering = YES;
+            [peripheral discoverServices:nil];
+        }
+        return;
+    }
+
+    if (pending == Pending::health)
+    {
+        [self readHealth];
+        return;
+    }
+
+    if (writeCharacteristic == nil || notifyCharacteristic == nil)
+    {
+        [self fail:@"The mixer has no vendor service AE40 with characteristics AE41 and AE42"];
+        return;
+    }
+    if (!notifying)
+    {
+        if (!subscribing)
+        {
+            subscribing = YES;
+            [peripheral setNotifyValue:YES forCharacteristic:notifyCharacteristic];
+        }
+        return;
+    }
+    if (!collecting)
+        [self sendQuery];
 }
 
-- (BOOL)hasFinished
+- (void)usePeripheral:(CBPeripheral*)target
 {
-    std::lock_guard<std::mutex> lock(operationState->mutex);
-    return operationState->finished;
+    if (scanning)
+    {
+        [central stopScan];
+        scanning = NO;
+    }
+    peripheral = target;
+    peripheral.delegate = self;
+    [self forgetConnection];
+}
+
+- (void)sendQuery
+{
+    if ((writeCharacteristic.properties & CBCharacteristicPropertyWriteWithoutResponse) == 0)
+    {
+        [self fail:@"AE41 does not accept writes without response"];
+        return;
+    }
+    reply.clear();
+    collecting = YES;
+    const auto maximum = static_cast<std::size_t>([peripheral maximumWriteValueLengthForType:CBCharacteristicWriteWithoutResponse]);
+    const auto* bytes = static_cast<const std::uint8_t*>(payload.bytes);
+    for (const auto& piece : VendorProtocol::fragments(Bytes(bytes, bytes + payload.length), maximum))
+        [writes addObject:[NSData dataWithBytes:piece.data() length:piece.size()]];
+    [self pumpWrites];
+}
+
+// Writes without response go out as fast as the link accepts them, in order.
+- (void)pumpWrites
+{
+    while (writes.count > 0 && peripheral.canSendWriteWithoutResponse)
+    {
+        NSData* next = writes.firstObject;
+        [writes removeObjectAtIndex:0];
+        [peripheral writeValue:next forCharacteristic:writeCharacteristic type:CBCharacteristicWriteWithoutResponse];
+    }
+}
+
+- (void)readHealth
+{
+    if (healthReading)
+        return;
+    healthReading = YES;
+    pendingReads = 0;
+    rssiRead = NO;
+    for (CBService* service in peripheral.services)
+    {
+        health.services.push_back(toStdString(service.UUID.UUIDString));
+        for (CBCharacteristic* characteristic in service.characteristics)
+        {
+            NSString* identifier = characteristic.UUID.UUIDString;
+            const auto wanted = [identifier isEqualToString:manufacturerName] || [identifier isEqualToString:modelNumber]
+                             || [identifier isEqualToString:batteryLevel];
+            if (wanted && (characteristic.properties & CBCharacteristicPropertyRead) != 0)
+            {
+                ++pendingReads;
+                [peripheral readValueForCharacteristic:characteristic];
+            }
+        }
+    }
+    [peripheral readRSSI];
+}
+
+- (void)finishHealthIfDone
+{
+    if (pending != Pending::health || !healthReading || pendingReads > 0 || !rssiRead)
+        return;
+    auto done = healthDone;
+    const auto result = health;
+    [self cancelPending];
+    if (done != nil)
+        done(result, nil);
 }
 
 - (void)centralManagerDidUpdateState:(CBCentralManager*)manager
 {
     if (manager.state != CBManagerStatePoweredOn)
-    {
-        if (manager.state != CBManagerStateUnknown)
-        {
-            NSString* message = [NSString stringWithFormat:@"Bluetooth is unavailable (state %ld, authorization %ld). Check the macOS Bluetooth permission.",
-                                 (long)manager.state, (long)CBManager.authorization];
-            [self finishWithError:message];
-        }
-        return;
-    }
-
-    NSArray<CBUUID*>* services = healthMode
-        ? @[ uuid(@"03B80E5A-EDE8-4B33-A751-6CE34EC4C700"), uuid(@"AE00") ]
-        : @[ uuid(@"AE40") ];
-    NSArray<CBPeripheral*>* connected = [manager retrieveConnectedPeripheralsWithServices:services];
-    NSUInteger index = [connected indexOfObjectPassingTest:^BOOL(CBPeripheral* item, NSUInteger, BOOL*) {
-        return [item.name isEqualToString:@"SMC-Mixer"];
-    }];
-    if (index != NSNotFound)
-        [self usePeripheral:connected[index]];
-    else
-        [manager scanForPeripheralsWithServices:nil options:nil];
+        [self forgetConnection];
+    [self advance];
 }
 
 - (void)centralManager:(CBCentralManager*)manager
@@ -150,344 +356,293 @@ CBUUID* uuid(NSString* value)
      advertisementData:(NSDictionary<NSString*, id>*)advertisementData
                   RSSI:(NSNumber*)RSSI
 {
-    if (peripheral != nil || ![discovered.name isEqualToString:@"SMC-Mixer"])
+    if (peripheral != nil || !isMixer(discovered))
         return;
-    if (healthMode)
-        operationState->health.rssi = RSSI.intValue;
     [self usePeripheral:discovered];
+    [self advance];
 }
 
-- (void)usePeripheral:(CBPeripheral*)target
+- (void)centralManager:(CBCentralManager*)manager didConnectPeripheral:(CBPeripheral*)connected
 {
-    peripheral = target;
-    peripheral.delegate = self;
-    [central stopScan];
-    if (peripheral.state == CBPeripheralStateConnected)
-    {
-        if (healthMode)
-        {
-            [peripheral readRSSI];
-            [peripheral discoverServices:nil];
-        }
-        else
-        {
-            [peripheral discoverServices:@[ uuid(@"AE40") ]];
-        }
-    }
-    else
-    {
-        [central connectPeripheral:peripheral options:nil];
-    }
+    [self forgetConnection];
+    [self advance];
 }
 
-- (void)centralManager:(CBCentralManager*)manager didConnectPeripheral:(CBPeripheral*)connectedPeripheral
-{
-    if (healthMode)
-    {
-        [connectedPeripheral readRSSI];
-        [connectedPeripheral discoverServices:nil];
-    }
-    else
-    {
-        [connectedPeripheral discoverServices:@[ uuid(@"AE40") ]];
-    }
-}
-
-- (void)centralManager:(CBCentralManager*)manager
- didFailToConnectPeripheral:(CBPeripheral*)failedPeripheral
-                 error:(NSError*)error
+- (void)centralManager:(CBCentralManager*)manager didFailToConnectPeripheral:(CBPeripheral*)failed error:(NSError*)error
 {
     NSString* detail = error.localizedDescription != nil ? error.localizedDescription : @"Unknown error";
-    [self finishWithError:[NSString stringWithFormat:@"Bluetooth connection failed: %@", detail]];
+    [self fail:[NSString stringWithFormat:@"Bluetooth connection failed: %@", detail]];
 }
 
-- (void)centralManager:(CBCentralManager*)manager
- didDisconnectPeripheral:(CBPeripheral*)disconnectedPeripheral
-                 error:(NSError*)error
+- (void)centralManager:(CBCentralManager*)manager didDisconnectPeripheral:(CBPeripheral*)disconnected error:(NSError*)error
 {
-    if (![self hasFinished])
+    const auto wasReady = self.ready;
+    [self forgetConnection];
+    if (pending != Pending::none)
     {
         NSString* detail = error.localizedDescription != nil ? error.localizedDescription : @"Connection closed";
-        [self finishWithError:[NSString stringWithFormat:@"Bluetooth disconnected before the query completed: %@", detail]];
+        [self fail:[NSString stringWithFormat:@"Bluetooth disconnected: %@", detail]];
     }
-}
-
-- (void)peripheral:(CBPeripheral*)device didReadRSSI:(NSNumber*)RSSI error:(NSError*)error
-{
-    if (!healthMode)
-        return;
-    if (error == nil)
-        operationState->health.rssi = RSSI.intValue;
-    rssiCompleted = true;
-    [self completeHealthIfReady];
+    if (wasReady && self.onDisconnected != nil)
+        self.onDisconnected();
 }
 
 - (void)peripheral:(CBPeripheral*)device didDiscoverServices:(NSError*)error
 {
     if (error != nil)
     {
-        [self finishWithError:[NSString stringWithFormat:@"GATT service discovery failed: %@", error.localizedDescription]];
+        discovering = NO;
+        [self fail:[NSString stringWithFormat:@"GATT service discovery failed: %@", error.localizedDescription]];
         return;
     }
-
-    if (!healthMode)
+    servicesToDescribe = static_cast<int>(device.services.count);
+    if (servicesToDescribe == 0)
     {
-        CBService* service = nil;
-        for (CBService* candidate in device.services)
-        {
-            if ([candidate.UUID.UUIDString isEqualToString:@"AE40"])
-                service = candidate;
-        }
-        if (service == nil)
-        {
-            [self finishWithError:@"The mixer has no AE40 vendor service"];
-            return;
-        }
-        [device discoverCharacteristics:@[ uuid(@"AE41"), uuid(@"AE42") ] forService:service];
+        discovering = NO;
+        [self fail:@"The mixer did not expose any GATT services"];
         return;
     }
-
-    NSArray<CBService*>* services = device.services != nil ? device.services : @[];
-    serviceCount = static_cast<int>(services.count);
-    operationState->health.services.clear();
-    for (CBService* service in services)
-    {
-        operationState->health.services.push_back(toStdString(service.UUID.UUIDString));
+    for (CBService* service in device.services)
         [device discoverCharacteristics:nil forService:service];
-    }
-    if (services.count == 0)
-        [self finishWithError:@"The mixer did not expose any GATT services"];
 }
 
-- (void)peripheral:(CBPeripheral*)device
- didDiscoverCharacteristicsForService:(CBService*)service
-             error:(NSError*)error
+- (void)peripheral:(CBPeripheral*)device didDiscoverCharacteristicsForService:(CBService*)service error:(NSError*)error
 {
-    if (error != nil)
-    {
-        [self finishWithError:[NSString stringWithFormat:@"GATT characteristic discovery failed: %@", error.localizedDescription]];
-        return;
-    }
-
-    if (!healthMode)
+    if (error == nil && [service.UUID.UUIDString isEqualToString:vendorService])
     {
         for (CBCharacteristic* characteristic in service.characteristics)
         {
-            if ([characteristic.UUID.UUIDString isEqualToString:@"AE42"])
-            {
-                [device setNotifyValue:YES forCharacteristic:characteristic];
-                return;
-            }
+            if ([characteristic.UUID.UUIDString isEqualToString:vendorWrite])
+                writeCharacteristic = characteristic;
+            if ([characteristic.UUID.UUIDString isEqualToString:vendorNotify])
+                notifyCharacteristic = characteristic;
         }
-        [self finishWithError:@"Vendor service AE40 has no AE42 notify characteristic"];
+    }
+    if (--servicesToDescribe > 0)
         return;
-    }
-
-    NSSet<NSString*>* readableIdentifiers = [NSSet setWithArray:@[ @"2A29", @"2A24", @"2A19" ]];
-    for (CBCharacteristic* characteristic in service.characteristics)
-    {
-        if ([readableIdentifiers containsObject:characteristic.UUID.UUIDString]
-            && (characteristic.properties & CBCharacteristicPropertyRead) != 0)
-        {
-            ++pendingReads;
-            [device readValueForCharacteristic:characteristic];
-        }
-    }
-    ++describedServices;
-    [self completeHealthIfReady];
+    discovering = NO;
+    servicesReady = YES;
+    self.ready = YES;
+    [self advance];
 }
 
-- (void)peripheral:(CBPeripheral*)device
- didUpdateNotificationStateForCharacteristic:(CBCharacteristic*)characteristic
-             error:(NSError*)error
+- (void)peripheral:(CBPeripheral*)device didUpdateNotificationStateForCharacteristic:(CBCharacteristic*)characteristic error:(NSError*)error
 {
-    if (healthMode)
+    if (![characteristic.UUID.UUIDString isEqualToString:vendorNotify])
         return;
+    subscribing = NO;
     if (error != nil)
     {
-        [self finishWithError:[NSString stringWithFormat:@"Could not subscribe to AE42: %@", error.localizedDescription]];
+        [self fail:[NSString stringWithFormat:@"Could not subscribe to AE42: %@", error.localizedDescription]];
         return;
     }
-
-    CBCharacteristic* writeCharacteristic = nil;
-    for (CBCharacteristic* candidate in characteristic.service.characteristics)
-    {
-        if ([candidate.UUID.UUIDString isEqualToString:@"AE41"])
-            writeCharacteristic = candidate;
-    }
-    if (writeCharacteristic == nil)
-    {
-        [self finishWithError:@"Vendor service AE40 has no AE41 write characteristic"];
-        return;
-    }
-    if ((writeCharacteristic.properties & CBCharacteristicPropertyWriteWithoutResponse) == 0)
-    {
-        [self finishWithError:@"AE41 does not accept writes without response"];
-        return;
-    }
-
-    const auto maximum = [device maximumWriteValueLengthForType:CBCharacteristicWriteWithoutResponse];
-    if (vendorQuery.length > maximum)
-    {
-        [self finishWithError:[NSString stringWithFormat:@"Bluetooth write is %lu bytes, above the current limit of %lu",
-                               (unsigned long)vendorQuery.length, (unsigned long)maximum]];
-        return;
-    }
-
-    operationState->response.clear();
-    [device writeValue:vendorQuery forCharacteristic:writeCharacteristic type:CBCharacteristicWriteWithoutResponse];
+    notifying = characteristic.isNotifying;
+    [self advance];
 }
 
-- (void)peripheral:(CBPeripheral*)device
- didWriteValueForCharacteristic:(CBCharacteristic*)characteristic
-             error:(NSError*)error
+- (void)peripheralIsReadyToSendWriteWithoutResponse:(CBPeripheral*)device
 {
-    if (healthMode || error == nil || [self hasFinished])
-        return;
-    NSString* detail = error.localizedDescription != nil ? error.localizedDescription : @"Write failed";
-    [self finishWithError:[NSString stringWithFormat:@"Bluetooth write failed: %@", detail]];
+    [self pumpWrites];
 }
 
-- (void)peripheral:(CBPeripheral*)device
- didUpdateValueForCharacteristic:(CBCharacteristic*)characteristic
-             error:(NSError*)error
+- (void)peripheral:(CBPeripheral*)device didWriteValueForCharacteristic:(CBCharacteristic*)characteristic error:(NSError*)error
+{
+    if (error != nil && pending == Pending::query)
+        [self fail:[NSString stringWithFormat:@"Bluetooth write failed: %@", error.localizedDescription]];
+}
+
+- (void)peripheral:(CBPeripheral*)device didReadRSSI:(NSNumber*)RSSI error:(NSError*)error
+{
+    if (pending != Pending::health)
+        return;
+    if (error == nil)
+        health.rssi = RSSI.intValue;
+    rssiRead = YES;
+    [self finishHealthIfDone];
+}
+
+- (void)peripheral:(CBPeripheral*)device didUpdateValueForCharacteristic:(CBCharacteristic*)characteristic error:(NSError*)error
 {
     NSString* identifier = characteristic.UUID.UUIDString;
-    if (!healthMode)
+    if ([identifier isEqualToString:vendorNotify])
     {
-        if (![identifier isEqualToString:@"AE42"])
+        // Only a reply to the request in flight is collected. A late notification for a
+        // request that timed out arrives with nothing waiting and is dropped.
+        if (pending != Pending::query || !collecting)
             return;
         if (error != nil)
         {
-            [self finishWithError:[NSString stringWithFormat:@"AE42 reply failed: %@", error.localizedDescription]];
+            [self fail:[NSString stringWithFormat:@"AE42 reply failed: %@", error.localizedDescription]];
             return;
         }
-
         NSData* value = characteristic.value;
-        if (value != nil && value.bytes != nil)
-        {
-            const auto* bytes = static_cast<const std::uint8_t*>(value.bytes);
-            operationState->response.insert(operationState->response.end(), bytes, bytes + value.length);
-        }
-        auto& response = operationState->response;
-        if (response.size() < 7)
+        const auto* bytes = static_cast<const std::uint8_t*>(value.bytes);
+        if (bytes != nullptr)
+            reply.insert(reply.end(), bytes, bytes + value.length);
+        if (reply.size() < 7)
             return;
-        if (response[0] != 0x00 || response[1] != 0x59)
+        if (reply[0] != 0x00 || reply[1] != 0x59)
         {
-            [self finishWithError:@"Vendor reply header does not match"];
+            [self fail:@"Vendor reply header does not match"];
             return;
         }
-        const int dataLength = static_cast<int>(response[3])
-                             | (static_cast<int>(response[4]) << 8)
-                             | (static_cast<int>(response[5]) << 16);
-        if (dataLength > 8192)
+        const auto length = static_cast<std::size_t>(reply[3]) | (static_cast<std::size_t>(reply[4]) << 8)
+                          | (static_cast<std::size_t>(reply[5]) << 16);
+        if (length > 8192)
         {
-            [self finishWithError:@"Vendor reply length is not valid"];
+            [self fail:@"Vendor reply length is not valid"];
             return;
         }
-        const auto expectedLength = static_cast<std::size_t>(dataLength + 7);
-        if (response.size() < expectedLength)
+        if (reply.size() < length + 7)
             return;
-        response.resize(expectedLength);
-        [self finishWithError:nil];
+        reply.resize(length + 7);
+        auto done = queryDone;
+        const auto result = reply;
+        [self cancelPending];
+        if (done != nil)
+            done(result, nil);
         return;
     }
 
-    NSSet<NSString*>* readableIdentifiers = [NSSet setWithArray:@[ @"2A29", @"2A24", @"2A19" ]];
-    if (![readableIdentifiers containsObject:identifier])
+    if (pending != Pending::health || !healthReading)
         return;
-
+    const auto wanted = [identifier isEqualToString:manufacturerName] || [identifier isEqualToString:modelNumber]
+                     || [identifier isEqualToString:batteryLevel];
+    if (!wanted)
+        return;
     NSData* value = characteristic.value;
     if (error == nil && value != nil)
     {
-        if ([identifier isEqualToString:@"2A19"] && value.length > 0)
-        {
-            operationState->health.battery = static_cast<const std::uint8_t*>(value.bytes)[0];
-        }
+        if ([identifier isEqualToString:batteryLevel] && value.length > 0)
+            health.battery = static_cast<const std::uint8_t*>(value.bytes)[0];
         else
         {
-            NSString* text = readableValue(value);
-            if (text != nil && [identifier isEqualToString:@"2A29"])
-                operationState->health.manufacturer = toStdString(text);
-            if (text != nil && [identifier isEqualToString:@"2A24"])
-                operationState->health.model = toStdString(text);
+            NSString* text = [[NSString alloc] initWithData:value encoding:NSUTF8StringEncoding];
+            if (text != nil && [identifier isEqualToString:manufacturerName])
+                health.manufacturer = toStdString(text);
+            if (text != nil && [identifier isEqualToString:modelNumber])
+                health.model = toStdString(text);
         }
     }
     if (pendingReads > 0)
         --pendingReads;
-    [self completeHealthIfReady];
-}
-
-- (void)completeHealthIfReady
-{
-    if (serviceCount > 0 && describedServices == serviceCount && pendingReads == 0 && rssiCompleted)
-        [self finishWithError:nil];
+    [self finishHealthIfDone];
 }
 
 @end
 
+struct BleTransport::Session
+{
+    dispatch_queue_t queue = dispatch_queue_create("local.smc-mixer.gui.bluetooth", DISPATCH_QUEUE_SERIAL);
+    SMCBleSession* object = [[SMCBleSession alloc] initWithQueue:queue];
+};
+
 namespace
 {
-template <typename Result, typename Extract>
-Result runOperation(const Bytes* query,
-                    bool healthMode,
-                    double timeoutSeconds,
-                    const std::atomic<bool>* stop,
-                    Extract extract)
+template <typename Result>
+struct Outcome
 {
-    @autoreleasepool
+    std::mutex mutex;
+    std::condition_variable condition;
+    bool finished = false;
+    std::string failure;
+    Result value {};
+};
+
+// Starts one request on the Bluetooth queue and waits for it, the deadline, or a stop.
+template <typename Result, typename Start>
+Result await(dispatch_queue_t queue, SMCBleSession* object, double timeoutSeconds, const std::atomic<bool>* stop,
+             const char* timeoutMessage, Start start)
+{
+    auto outcome = std::make_shared<Outcome<Result>>();
+    start(outcome);
+
+    std::unique_lock<std::mutex> lock(outcome->mutex);
+    const auto deadline = std::chrono::steady_clock::now()
+                        + std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double>(timeoutSeconds));
+    while (!outcome->finished)
     {
-        OperationState state;
-        const char* label = healthMode ? "local.smc-mixer.gui.ble-health" : "local.smc-mixer.gui.ble-query";
-        dispatch_queue_t queue = dispatch_queue_create(label, DISPATCH_QUEUE_SERIAL);
-        SMCBleOperation* operation = [[SMCBleOperation alloc] initWithState:&state
-                                                                      query:query
-                                                                  healthMode:healthMode
-                                                                       queue:queue];
-        [operation start];
-
-        std::unique_lock<std::mutex> lock(state.mutex);
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::duration<double>(timeoutSeconds);
-        bool completed = false;
-        while (std::chrono::steady_clock::now() < deadline)
-        {
-            if (stop != nullptr && stop->load())
-                break;
-            completed = state.condition.wait_for(lock, std::chrono::milliseconds(200), [&state] {
-                return state.finished;
-            });
-            if (completed)
-                break;
-        }
-        if (!completed)
-        {
-            const auto cancelled = stop != nullptr && stop->load();
-            state.failure = cancelled ? "Cancelled"
-                                      : healthMode ? "Bluetooth health data timed out" : "Timed out waiting for the AE42 vendor reply";
-            state.finished = true;
-        }
-        lock.unlock();
-
-        [operation shutdown];
-        if (!state.failure.empty())
-            throw std::runtime_error(state.failure);
-        return extract(state);
+        if (stop != nullptr && stop->load())
+            break;
+        if (outcome->condition.wait_until(lock, std::min(deadline, std::chrono::steady_clock::now() + std::chrono::milliseconds(100)))
+                == std::cv_status::timeout
+            && std::chrono::steady_clock::now() >= deadline)
+            break;
     }
+    if (!outcome->finished)
+    {
+        lock.unlock();
+        const auto connected = object.ready;
+        dispatch_async(queue, ^{ [object cancelPending]; });
+        if (stop != nullptr && stop->load())
+            throw std::runtime_error("Cancelled");
+        throw std::runtime_error(connected ? timeoutMessage
+                                           : "The mixer did not connect over Bluetooth. Switch it on and check that it is in range");
+    }
+    if (!outcome->failure.empty())
+        throw std::runtime_error(outcome->failure);
+    return outcome->value;
 }
+}
+
+BleTransport::BleTransport()
+    : session(std::make_unique<Session>())
+{
+    session->object.onDisconnected = ^{
+        if (onDisconnected)
+            onDisconnected();
+    };
+}
+
+BleTransport::~BleTransport()
+{
+    auto* object = session->object;
+    object.onDisconnected = nil;
+    dispatch_sync(session->queue, ^{ [object shutdown]; });
 }
 
 Bytes BleTransport::queryVendor(const Bytes& query, double timeoutSeconds, const std::atomic<bool>* stop)
 {
-    return runOperation<Bytes>(&query, false, timeoutSeconds, stop, [](OperationState& state) {
-        if (state.response.empty())
-            throw std::runtime_error("AE42 returned an empty payload");
-        return state.response;
-    });
+    auto* object = session->object;
+    NSData* data = [NSData dataWithBytes:query.data() length:query.size()];
+    return await<Bytes>(session->queue, object, timeoutSeconds, stop, "Timed out waiting for the AE42 vendor reply",
+                        [&](std::shared_ptr<Outcome<Bytes>> outcome) {
+                            dispatch_async(session->queue, ^{
+                                [object startQuery:data done:^(const Bytes& reply, NSString* error) {
+                                    std::lock_guard<std::mutex> lock(outcome->mutex);
+                                    outcome->value = reply;
+                                    outcome->failure = toStdString(error);
+                                    outcome->finished = true;
+                                    outcome->condition.notify_all();
+                                }];
+                            });
+                        });
 }
 
 BleHealthInfo BleTransport::readHealth(double timeoutSeconds, const std::atomic<bool>* stop)
 {
-    return runOperation<BleHealthInfo>(nullptr, true, timeoutSeconds, stop, [](OperationState& state) {
-        return state.health;
-    });
+    auto* object = session->object;
+    return await<BleHealthInfo>(session->queue, object, timeoutSeconds, stop, "Bluetooth health data timed out",
+                                [&](std::shared_ptr<Outcome<BleHealthInfo>> outcome) {
+                                    dispatch_async(session->queue, ^{
+                                        [object startHealth:^(const BleHealthInfo& health, NSString* error) {
+                                            std::lock_guard<std::mutex> lock(outcome->mutex);
+                                            outcome->value = health;
+                                            outcome->failure = toStdString(error);
+                                            outcome->finished = true;
+                                            outcome->condition.notify_all();
+                                        }];
+                                    });
+                                });
+}
+
+bool BleTransport::isConnected() const
+{
+    return session->object.ready;
+}
+
+void BleTransport::disconnect()
+{
+    auto* object = session->object;
+    dispatch_sync(session->queue, ^{ [object shutdown]; });
 }

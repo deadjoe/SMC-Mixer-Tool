@@ -1,12 +1,10 @@
 #include "DeviceController.h"
 
-#include "BleTransport.h"
 #include "SettingsProtocol.h"
+#include "SettingsReader.h"
 #include "SettingsWriter.h"
 #include "VendorProtocol.h"
 
-#include <algorithm>
-#include <iterator>
 #include <string>
 #include <utility>
 
@@ -42,7 +40,26 @@ bool acknowledgementReady(const std::vector<Bytes>& messages)
 DeviceController::DeviceController()
     : juce::Thread("SMC Mixer Device Worker")
 {
+    midi.onSetupChanged = [this] { connectionChanged.store(true); };
+    bluetooth.onDisconnected = [this] { connectionChanged.store(true); };
     startThread();
+}
+
+bool DeviceController::takeConnectionChange()
+{
+    return connectionChanged.exchange(false);
+}
+
+bool DeviceController::isUsbPresent()
+{
+    MidiEndpointDescriptor source;
+    MidiEndpointDescriptor destination;
+    return CoreMidiTransport::findEndpoints(TransportKind::usbC, source, destination);
+}
+
+bool DeviceController::isBluetoothConnected()
+{
+    return bluetooth.isConnected();
 }
 
 DeviceController::~DeviceController()
@@ -95,6 +112,8 @@ void DeviceController::shutdown()
     }
     condition.notify_all();
     stopThread(30000);
+    midi.onSetupChanged = nullptr;
+    bluetooth.onDisconnected = nullptr;
 }
 
 void DeviceController::run()
@@ -198,11 +217,11 @@ void DeviceController::executeRefresh(TransportKind transport)
     }
     else
     {
-        const auto payload = BleTransport::queryVendor(VendorProtocol::versionQueryPayload(), 12.0, &stop);
+        const auto payload = bluetooth.queryVendor(VendorProtocol::versionQueryPayload(), 12.0, &stop);
         snapshot.version = VendorProtocol::parseVersionPayload(payload);
         try
         {
-            snapshot.health = BleTransport::readHealth(20.0, &stop);
+            snapshot.health = bluetooth.readHealth(8.0, &stop);
             snapshot.hasHealth = true;
         }
         catch (const std::exception&)
@@ -221,63 +240,31 @@ void DeviceController::executeRefresh(TransportKind transport)
 
 void DeviceController::executeSettings(TransportKind transport)
 {
-    constexpr auto totalLength = static_cast<std::uint32_t>(layout::snapshotSize);
-    constexpr auto chunkSize = layout::readChunkSize;
-    std::vector<Bytes> responses;
+    const auto readChunk = [&](std::uint32_t address, std::uint32_t length) {
+        // The first request may have to connect over Bluetooth; later ones only wait for the reply.
+        return exchange(transport, SettingsProtocol::readPayload(address, length), std::chrono::milliseconds { 2000 },
+                        bluetooth.isConnected() ? 4.0 : 12.0,
+                        [address, length](const std::vector<Bytes>& replies) { return chunkReady(replies, address, length); });
+    };
+    const auto report = [&](double progress) {
+        DeviceEvent event;
+        event.kind = DeviceEvent::Kind::settingsProgress;
+        event.transport = transport;
+        event.settingsOperation = true;
+        event.progress = progress;
+        emit(std::move(event));
+    };
 
-    for (std::uint32_t address = 0; address < totalLength; address += chunkSize)
-    {
-        if (threadShouldExit() || stop.load())
-            return;
-
-        DeviceEvent progressEvent;
-        progressEvent.kind = DeviceEvent::Kind::settingsProgress;
-        progressEvent.transport = transport;
-        progressEvent.settingsOperation = true;
-        progressEvent.progress = static_cast<double>(address) / totalLength;
-        emit(std::move(progressEvent));
-
-        const auto length = std::min(chunkSize, totalLength - address);
-        if (transport == TransportKind::usbC)
-        {
-            auto part = midi.sendAndCapture(transport,
-                                             VendorProtocol::sysEx(SettingsProtocol::readPayload(address, length)),
-                                             std::chrono::milliseconds { 2000 },
-                                             &stop,
-                                             [&](const std::vector<Bytes>& messages) {
-                                                 return chunkReady(messages, address, length);
-                                             });
-            responses.insert(responses.end(),
-                             std::make_move_iterator(part.begin()),
-                             std::make_move_iterator(part.end()));
-        }
-        else
-        {
-            responses.push_back(BleTransport::queryVendor(SettingsProtocol::readPayload(address, length), 3.0, &stop));
-        }
-    }
-
-    if (threadShouldExit() || stop.load())
+    auto result = SettingsReader::read(readChunk, report, [this] { return threadShouldExit() || stop.load(); });
+    if (!result)
         return;
-
-    auto result = SettingsProtocol::parseResponses(responses);
-    result.transport = transport;
-    if (result.data.size() != totalLength)
-        throw std::runtime_error("Settings snapshot should be " + std::to_string(totalLength) + " bytes, received "
-                                 + std::to_string(result.data.size()));
-
-    DeviceEvent progressEvent;
-    progressEvent.kind = DeviceEvent::Kind::settingsProgress;
-    progressEvent.transport = transport;
-    progressEvent.settingsOperation = true;
-    progressEvent.progress = 1.0;
-    emit(std::move(progressEvent));
+    result->transport = transport;
 
     DeviceEvent event;
     event.kind = DeviceEvent::Kind::settingsReady;
     event.transport = transport;
     event.settingsOperation = true;
-    event.settings = std::move(result);
+    event.settings = std::move(*result);
     emit(std::move(event));
 }
 
@@ -292,7 +279,7 @@ std::vector<Bytes> DeviceController::exchange(TransportKind transport,
     if (transport == TransportKind::usbC)
         return midi.sendAndCapture(transport, VendorProtocol::sysEx(payload), usbWindow, &stop, ready);
 
-    return { BleTransport::queryVendor(payload, bluetoothTimeoutSeconds, &stop) };
+    return { bluetooth.queryVendor(payload, bluetoothTimeoutSeconds, &stop) };
 }
 
 void DeviceController::executeWrite(TransportKind transport, const std::vector<SettingsSpan>& spans)

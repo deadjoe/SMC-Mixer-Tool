@@ -1,6 +1,6 @@
 // Builds the app's components without a window and checks what the person would see and do.
-// Nothing here opens a MIDI port or a Bluetooth connection: the main component is created
-// without connecting, and device events are delivered by hand.
+// Nothing here opens a MIDI port or a Bluetooth connection: the main component talks to a
+// FakeLink, which records requests, and device events are delivered by hand.
 //
 //   SMCMixerUITests                 runs the checks
 //   SMCMixerUITests --render <dir>  also saves a PNG of each state
@@ -10,6 +10,7 @@
 #include <JuceHeader.h>
 
 #include <iostream>
+#include <utility>
 #include <memory>
 #include <string>
 #include <vector>
@@ -118,12 +119,72 @@ void connect(MainComponent& main, const DeviceSnapshot& snapshot = usbSnapshot()
     main.deliver(settings);
 }
 
-std::unique_ptr<MainComponent> makeMain(int width = 1360, int height = 900)
+// Records what the window asks of the mixer, and reports whatever connection state a test sets.
+struct FakeLink final : DeviceLink
 {
-    auto main = std::make_unique<MainComponent>(MainComponent::Options { false });
+    struct Request
+    {
+        enum class Kind
+        {
+            refresh,
+            settings,
+            write
+        };
+        Kind kind = Kind::refresh;
+        TransportKind transport = TransportKind::usbC;
+        bool thenReadSettings = false;
+        std::vector<SettingsSpan> spans;
+    };
+
+    std::vector<Request> requests;
+    bool usbPresent = true;
+    bool bluetoothConnected = true;
+    bool changed = false;
+
+    bool requestRefresh(TransportKind transport, bool thenReadSettings) override
+    {
+        requests.push_back({ Request::Kind::refresh, transport, thenReadSettings, {} });
+        return true;
+    }
+    bool requestSettings(TransportKind transport) override
+    {
+        requests.push_back({ Request::Kind::settings, transport, false, {} });
+        return true;
+    }
+    bool requestWrite(TransportKind transport, std::vector<SettingsSpan> spans) override
+    {
+        requests.push_back({ Request::Kind::write, transport, false, std::move(spans) });
+        return true;
+    }
+    std::vector<DeviceEvent> pollEvents() override { return {}; }
+    bool takeConnectionChange() override { return std::exchange(changed, false); }
+    bool isUsbPresent() override { return usbPresent; }
+    bool isBluetoothConnected() override { return bluetoothConnected; }
+    void shutdown() override {}
+};
+
+FakeLink* lastLink = nullptr;
+
+std::unique_ptr<MainComponent> makeMain(int width = 1360, int height = 900, bool connectOnStart = false)
+{
+    MainComponent::Options options;
+    auto fake = std::make_unique<FakeLink>();
+    lastLink = fake.get();
+    options.link = std::move(fake);
+    options.connectOnStart = connectOnStart;
+    auto main = std::make_unique<MainComponent>(std::move(options));
     main->setSize(width, height);
     main->setVisible(true);
     return main;
+}
+
+void answerYes(MainComponent& main, std::vector<juce::String>* titles = nullptr)
+{
+    main.confirm = [titles](const MainComponent::Confirmation& confirmation, std::function<void(bool)> reply) {
+        if (titles != nullptr)
+            titles->push_back(confirmation.title);
+        reply(true);
+    };
 }
 
 std::uint8_t userByte(const MainComponent& main, std::size_t offset)
@@ -415,6 +476,139 @@ void testLongNote()
                                                 + std::to_string(textWidth) + " in 2 x " + std::to_string(width));
 }
 
+void testStartupAndWrite()
+{
+    auto main = makeMain(1360, 900, true);
+    auto& link = *lastLink;
+    expect(link.requests.size() == 1 && link.requests[0].kind == FakeLink::Request::Kind::refresh
+               && link.requests[0].thenReadSettings,
+           "opening the app reads the identity and the settings");
+    expect(main->header().getStatus().state == "Connecting", "connecting at start");
+
+    connect(*main);
+    main->selectControl({ ControlKind::knob, 0 });
+    main->overview().inspector().numberFieldFor(EditableField::cc)->setValueFromUser(40);
+    std::vector<juce::String> asked;
+    answerYes(*main, &asked);
+    main->commands().invokeDirectly(MainComponent::writeCommand, false);
+    expect(!link.requests.empty() && link.requests.back().kind == FakeLink::Request::Kind::write
+               && link.requests.back().spans.size() == 1,
+           "Write sends the one changed record");
+    expect(main->header().getStatus().state == "Writing", "writing state");
+
+    int quits = 0;
+    main->requestQuit([&] { ++quits; });
+    expect(asked.size() == 2 && asked.back() == "A write is in progress" && quits == 1, "quitting mid-write asks first");
+
+    DeviceEvent written;
+    written.kind = DeviceEvent::Kind::settingsWritten;
+    written.settingsOperation = true;
+    written.writeOperation = true;
+    written.written = link.requests.back().spans;
+    main->deliver(written);
+    expect(!main->hasUnsavedEdits(), "a verified write leaves nothing unsaved");
+    expect(main->toast().getMessage().contains("saved them to flash"), "the write is confirmed");
+}
+
+void testHotPlug()
+{
+    auto main = makeMain();
+    auto& link = *lastLink;
+    connect(*main);
+    main->selectControl({ ControlKind::knob, 0 });
+    main->overview().inspector().numberFieldFor(EditableField::cc)->setValueFromUser(40);
+
+    link.usbPresent = false;
+    link.changed = true;
+    main->pollLink();
+    expect(main->header().getStatus().state == "Unplugged", "unplugging is noticed at once");
+    expect(main->hasUnsavedEdits(), "unplugging keeps the edits");
+
+    link.usbPresent = true;
+    link.changed = true;
+    main->pollLink();
+    expect(!link.requests.empty() && link.requests.back().kind == FakeLink::Request::Kind::refresh
+               && !link.requests.back().thenReadSettings,
+           "plugging back in reconnects without rereading over the edits");
+    DeviceEvent identity;
+    identity.kind = DeviceEvent::Kind::snapshotReady;
+    identity.snapshot = usbSnapshot();
+    main->deliver(identity);
+    expect(main->header().getStatus().state == "Online" && main->hasUnsavedEdits(), "online again with the edits");
+
+    // Without edits, a replug reads everything again.
+    main->commands().invokeDirectly(MainComponent::revertAllCommand, false);
+    link.usbPresent = false;
+    link.changed = true;
+    main->pollLink();
+    link.usbPresent = true;
+    link.changed = true;
+    main->pollLink();
+    expect(link.requests.back().kind == FakeLink::Request::Kind::refresh && link.requests.back().thenReadSettings,
+           "a clean replug reads the settings too");
+
+    auto wireless = makeMain();
+    auto& wirelessLink = *lastLink;
+    connect(*wireless, bluetoothSnapshot());
+    wireless->commands().invokeDirectly(MainComponent::useBluetoothCommand, false);
+    connect(*wireless, bluetoothSnapshot());
+    wirelessLink.bluetoothConnected = false;
+    wirelessLink.changed = true;
+    wireless->pollLink();
+    expect(wireless->header().getStatus().state == "Disconnected", "a dropped Bluetooth link is reported");
+}
+
+juce::File temporaryFile(const juce::String& name, const juce::String& text)
+{
+    auto file = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("smc-ui-tests").getChildFile(name);
+    file.getParentDirectory().createDirectory();
+    file.replaceWithText(text);
+    return file;
+}
+
+void testImport()
+{
+    auto main = makeMain();
+    connect(*main);
+    const auto exported = mixerui::utf8(ControlConfiguration::parse(demoImage()).toJson(DeviceProfile::ccUser));
+
+    // An exported profile, edited by hand: knob 1 to CC 64, fader 3 to channel 5, Play to Program.
+    auto var = juce::JSON::parse(exported);
+    var["knobs"][0].getDynamicObject()->setProperty("cc", 64);
+    var["faders"][2].getDynamicObject()->setProperty("channel", 5);
+    var["globalButtons"][0].getDynamicObject()->setProperty("mode", 3);
+    main->importFile(temporaryFile("edited.json", juce::JSON::toString(var)));
+    expect(main->toast().getMessage().contains("3 records differ"), "import reports the changed records");
+    expect(userByte(*main, layout::knobsOffset + 3) == 64, "imported knob cc");
+    expect(userByte(*main, layout::slidersOffset + 2 * layout::sliderSize + 1) == 4, "imported channel counts from 1");
+    expect(userByte(*main, layout::trackButtonCount * layout::buttonSize) == 3, "imported mode");
+    main->commands().invokeDirectly(MainComponent::undoCommand, false);
+    expect(!main->hasUnsavedEdits(), "an import is one undo step");
+
+    // A file naming only some controls changes only those.
+    main->importFile(temporaryFile("partial.json", R"({ "knobs": [ { "index": 8, "cc": 1 } ] })"));
+    expect(main->document().dirtySpans().size() == 1 && userByte(*main, layout::knobsOffset + 7 * layout::knobSize + 3) == 1,
+           "a partial file changes one knob");
+    main->commands().invokeDirectly(MainComponent::revertAllCommand, false);
+
+    main->importFile(temporaryFile("broken.json", "{ not json"));
+    expect(main->toast().getMessage().startsWith("Nothing was imported") && !main->hasUnsavedEdits(), "bad JSON is refused");
+    main->importFile(temporaryFile("range.json", R"({ "faders": [ { "index": 1, "channel": 17 } ] })"));
+    expect(main->toast().getMessage().contains("Fader 1") && !main->hasUnsavedEdits(), "an impossible channel is refused");
+
+    auto image = demoImage();
+    image[layout::profileSize + layout::knobsOffset + 3] = 99;
+    auto binary = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("smc-ui-tests").getChildFile("image.bin");
+    binary.replaceWithData(image.data(), image.size());
+    main->commands().invokeDirectly(MainComponent::showDawCommand, false);
+    main->importFile(binary);
+    expect(userByte(*main, layout::knobsOffset + 3) == 99, "a settings image imports byte for byte");
+    juce::ApplicationCommandInfo ccUser(MainComponent::showCcUserCommand);
+    main->getCommandInfo(MainComponent::showCcUserCommand, ccUser);
+    expect((ccUser.flags & juce::ApplicationCommandInfo::isTicked) != 0, "the import shows CC / User");
+    juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("smc-ui-tests").deleteRecursively();
+}
+
 void testContrast()
 {
     const auto ratio = [](juce::Colour a, juce::Colour b) {
@@ -501,6 +695,9 @@ int main(int argc, char* argv[])
     testWriteButton();
     testProfilesAndPanel();
     testLongNote();
+    testStartupAndWrite();
+    testHotPlug();
+    testImport();
     testContrast();
 
     for (int index = 1; index + 1 < argc; ++index)

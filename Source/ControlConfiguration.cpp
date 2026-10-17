@@ -200,6 +200,52 @@ ControlConfiguration ControlConfiguration::parse(const Bytes& data)
     return result;
 }
 
+void ControlConfiguration::writeProfile(const ControlProfile& source, DeviceProfile which, Bytes& image)
+{
+    if (image.size() != layout::snapshotSize)
+        throw std::runtime_error("Control configuration must contain exactly "
+                                 + std::to_string(layout::snapshotSize) + " bytes");
+
+    const auto profileBase = static_cast<std::size_t>(which) * layout::profileSize;
+    for (std::size_t index = 0; index < layout::buttonCount; ++index)
+    {
+        const auto& button = source.buttons[index];
+        if (button.dawMessage.size() > layout::buttonMessageCapacity)
+            throw std::runtime_error("A button message is longer than "
+                                     + std::to_string(layout::buttonMessageCapacity) + " bytes");
+        auto* record = image.data() + profileBase + index * layout::buttonSize;
+        record[0] = button.mode;
+        record[1] = button.channel;
+        record[2] = button.cc;
+        record[3] = button.value1;
+        record[4] = button.value2;
+        record[5] = static_cast<std::uint8_t>(button.dawMessage.size());
+        std::copy(button.dawMessage.begin(), button.dawMessage.end(), record + 6);
+        record[layout::buttonSize - 1] = button.led;
+    }
+    for (std::size_t index = 0; index < layout::knobCount; ++index)
+    {
+        const auto& knob = source.knobs[index];
+        auto* record = image.data() + profileBase + layout::knobsOffset + index * layout::knobSize;
+        record[0] = knob.type;
+        record[1] = knob.speed;
+        record[2] = knob.channel;
+        record[3] = knob.cc;
+        record[4] = knob.minimum;
+        record[5] = knob.maximum;
+    }
+    for (std::size_t index = 0; index < layout::sliderCount; ++index)
+    {
+        const auto& slider = source.sliders[index];
+        auto* record = image.data() + profileBase + layout::slidersOffset + index * layout::sliderSize;
+        record[0] = slider.type;
+        record[1] = slider.channel;
+        record[2] = slider.cc;
+        record[3] = slider.minimum;
+        record[4] = slider.maximum;
+    }
+}
+
 const ControlProfile& ControlConfiguration::profile(DeviceProfile selectedProfile) const
 {
     return profiles[static_cast<std::size_t>(selectedProfile)];

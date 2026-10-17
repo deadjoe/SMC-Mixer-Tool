@@ -24,11 +24,20 @@ struct MidiEndpointDescriptor
     std::string fullName() const;
 };
 
+// One CoreMIDI client and one pair of ports for the life of the app. Opening a link connects
+// the mixer's source to the input port; closing disconnects it. Apple advises against
+// disposing of a process's last client, since the MIDI server may then refuse new ones.
+//
+// Construct it on the message thread: CoreMIDI delivers setup notifications on the run loop
+// of the thread that created the client.
 class CoreMidiTransport
 {
 public:
-    CoreMidiTransport() = default;
+    CoreMidiTransport();
     ~CoreMidiTransport();
+
+    // Called on the message thread when a MIDI device appears or disappears.
+    std::function<void()> onSetupChanged;
 
     CoreMidiTransport(const CoreMidiTransport&) = delete;
     CoreMidiTransport& operator=(const CoreMidiTransport&) = delete;
@@ -59,6 +68,7 @@ private:
     static MidiEndpointDescriptor descriptor(MIDIEndpointRef endpoint);
     static std::string objectName(MIDIObjectRef object);
     static void midiReadCallback(const MIDIPacketList* packets, void* readContext, void* sourceContext);
+    static void midiNotifyCallback(const MIDINotification* message, void* context);
 
     void open(TransportKind transport);
     void send(const Bytes& message);
@@ -70,6 +80,7 @@ private:
     MIDIPortRef outputPort = MIDIPortRef {};
     MIDIEndpointRef source = MIDIEndpointRef {};
     MIDIEndpointRef destination = MIDIEndpointRef {};
+    std::string setupError;
     bool isOpen = false;
     bool acceptingMidi = false;
     TransportKind openTransport = TransportKind::usbC;
