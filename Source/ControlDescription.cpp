@@ -33,9 +33,8 @@ FieldMeaning knobMeaning(std::uint8_t type)
         case 2:
             meaning.ccIsController = false;
             meaning.ccUsed = false;
-            meaning.rangeUsed = false;
             meaning.note = "Like a Mackie fader: Note On 104 plus the channel number on channel 1 while turning, "
-                           "and Pitch Bend on this channel. No CC number is sent.";
+                           "and Pitch Bend between Min and Max on this channel. No CC number is sent.";
             break;
         case knobTypeRelative:
             meaning.minimumName = "CCW value";
@@ -65,7 +64,8 @@ FieldMeaning sliderMeaning(std::uint8_t type)
         case 2:
             meaning.ccIsController = false;
             meaning.ccUsed = false;
-            meaning.note = "Sends Pitch Bend on the channel, as a Mackie fader does. No CC number is sent.";
+            meaning.note = "Sends Pitch Bend between Min and Max on the channel, as a Mackie fader does. "
+                           "No CC number is sent.";
             break;
         default:
             break;
@@ -165,7 +165,7 @@ ControlSummary summarize(const ControlProfile& profile, ControlSelection selecti
             {
                 case 0: summary = { std::to_string(knob.cc), "Abs" + dot + channel, true, knob.minimum, knob.maximum, false }; break;
                 case 1: summary = { "AT", channel, true, knob.minimum, knob.maximum, false }; break;
-                case 2: summary = { "PB", "Touch" + dot + channel, false, 0, 127, false }; break;
+                case 2: summary = { "PB", "Touch" + dot + channel, true, knob.minimum, knob.maximum, false }; break;
                 case knobTypeRelative: summary = { std::to_string(knob.cc), "Rel" + dot + channel, false, 0, 127, true }; break;
                 default: summary = { "?", "Type " + std::to_string(knob.type), false, 0, 127, false }; break;
             }
@@ -179,7 +179,7 @@ ControlSummary summarize(const ControlProfile& profile, ControlSelection selecti
             {
                 case 0: summary = { "CC " + std::to_string(slider.cc), channel, true, slider.minimum, slider.maximum, false }; break;
                 case 1: summary = { "AT", channel, true, slider.minimum, slider.maximum, false }; break;
-                case 2: summary = { "PB", channel, false, 0, 127, false }; break;
+                case 2: summary = { "PB", channel, true, slider.minimum, slider.maximum, false }; break;
                 default: summary = { "?", "Type " + std::to_string(slider.type), false, 0, 127, false }; break;
             }
             break;
@@ -225,7 +225,7 @@ std::string describe(const ControlProfile& profile, ControlSelection selection)
         if (meaning.ccIsController)
             text += std::string(" (") + controlChangeName(fieldValue(profile, selection, EditableField::cc)) + ")";
     }
-    if (!isButton(selection.kind) && meaning.rangeUsed)
+    if (!isButton(selection.kind))
         text += dot + meaning.minimumName + " " + value(EditableField::minimum)
               + dot + meaning.maximumName + " " + value(EditableField::maximum);
     if (isButton(selection.kind))
